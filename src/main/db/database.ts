@@ -94,6 +94,14 @@ export class Database {
   }
 
   private ensureColumn(table: string, column: string, definition: string): void {
+    const ALLOWED_TABLES = new Set(['sessions', 'findings', 'reports', 'agent_logs'])
+    const ALLOWED_COLUMN_RE = /^[a-z_][a-z0-9_]*$/
+    const ALLOWED_DEFINITIONS = new Set(['TEXT', 'INTEGER', 'REAL', 'BLOB', 'NUMERIC'])
+
+    if (!ALLOWED_TABLES.has(table)) throw new Error(`[Database] Invalid table: ${table}`)
+    if (!ALLOWED_COLUMN_RE.test(column)) throw new Error(`[Database] Invalid column name: ${column}`)
+    if (!ALLOWED_DEFINITIONS.has(definition)) throw new Error(`[Database] Invalid column definition: ${definition}`)
+
     const result = this.db.exec(`PRAGMA table_info(${table})`)
     if (!result.length) return
     const nameIndex = result[0].columns.indexOf('name')

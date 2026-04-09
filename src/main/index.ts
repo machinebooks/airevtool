@@ -45,7 +45,7 @@ function createWindow() {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      sandbox: true,
     },
   })
 
@@ -116,11 +116,32 @@ app.on('window-all-closed', () => {
 
 // ── IPC Handlers ─────────────────────────────────────────────
 
+// Validate hex address: optional 0x prefix, 1–16 hex digits
+function isValidAddress(addr: string): boolean {
+  return /^(0x)?[0-9a-fA-F]{1,16}$/.test(addr)
+}
+
+// x64dbg script commands allowed from the renderer
+const DBG_COMMAND_ALLOWLIST = new Set([
+  'anal', 'bp', 'bph', 'bpm', 'bpx', 'bd', 'be', 'bc', 'bpc', 'bpd', 'bpe',
+  'g', 'p', 't', 'sti', 'sto', 'run', 'pause', 'ret',
+  'log', 'msg', 'comment', 'lbl', 'symfollow',
+  'disasm', 'd', 'dump', 'find', 'findall', 'ref', 'xref',
+  'yara', 'asm', 'efl', 'cfl',
+])
+
+function isAllowedDbgCommand(cmd: string): boolean {
+  if (typeof cmd !== 'string' || cmd.length === 0 || cmd.length > 512) return false
+  const name = cmd.trim().split(/\s+/)[0].toLowerCase()
+  return DBG_COMMAND_ALLOWLIST.has(name)
+}
+
 function registerIPC() {
   // ── Debugger control — all swallow errors when not connected ──
   const tryDbg = <T>(fn: () => Promise<T>) => fn().catch(() => null)
 
   ipcMain.handle(IPC.DBG_START, async (_, targetPath: string, arch: 'x64' | 'x32') => {
+    if (typeof targetPath !== 'string' || targetPath.length === 0) return null
     return tryDbg(() => dbgBridge.startSession(targetPath, arch))
   })
 
@@ -161,7 +182,9 @@ function registerIPC() {
   })
 
   ipcMain.handle(IPC.DBG_MEM_READ, async (_, address: string, size: number) => {
-    return dbgBridge.readMemory(address, size)
+    if (!isValidAddress(address)) return null
+    const safeSize = Math.max(1, Math.min(Math.floor(size), 1024 * 1024))
+    return dbgBridge.readMemory(address, safeSize)
   })
 
   ipcMain.handle(IPC.DBG_MEM_MAP, async () => {
@@ -169,7 +192,9 @@ function registerIPC() {
   })
 
   ipcMain.handle(IPC.DBG_DISASM, async (_, address: string, count: number) => {
-    return dbgBridge.disassemble(address, count)
+    if (!isValidAddress(address)) return null
+    const safeCount = Math.max(1, Math.min(Math.floor(count), 10_000))
+    return dbgBridge.disassemble(address, safeCount)
   })
 
   ipcMain.handle(IPC.DBG_REGS, async () => {
@@ -181,6 +206,7 @@ function registerIPC() {
   })
 
   ipcMain.handle(IPC.DBG_COMMAND, async (_, cmd: string) => {
+    if (!isAllowedDbgCommand(cmd)) return null
     return dbgBridge.sendCommand(cmd)
   })
 
