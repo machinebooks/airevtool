@@ -1,0 +1,42 @@
+# Node / frontend
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Build outputs
+dist/
+dist-electron/
+release/
+release-alt/
+release-alt-*/
+
+# Native plugin build outputs
+x64dbg-plugin/build/
+x64dbg-plugin/*.lib
+x64dbg-plugin/*.exp
+x64dbg-plugin/*.pdb
+x64dbg-plugin/*.ilk
+x64dbg-plugin/*.log
+
+# Runtime / local data
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# IDE / local tooling
+.claude/
+.idea/
+.vs/
+.vscode/
+*.code-workspace
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# External dependencies checked out locally
+x64dbg/
