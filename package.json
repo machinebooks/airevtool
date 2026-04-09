@@ -1,0 +1,68 @@
+{
+  "name": "airevtool",
+  "version": "0.5.0",
+  "description": "AI-powered binary analysis tool for automated 0-day vulnerability research",
+  "main": "dist-electron/main/index.js",
+  "scripts": {
+    "dev": "vite",
+    "dev:electron": "vite",
+    "build": "npm run build:main && npm run build:renderer && npm run build:plugin && electron-builder",
+    "build:renderer": "vite build",
+    "build:main": "tsc -p tsconfig.node.json",
+    "build:plugin": "powershell -ExecutionPolicy Bypass -File ./scripts/build-plugin.ps1",
+    "preview": "vite preview",
+    "package": "electron-builder",
+    "postinstall": ""
+  },
+  "keywords": ["binary-analysis", "reverse-engineering", "ai", "x64dbg", "vulnerability-research"],
+  "author": "AIrevtool Team",
+  "license": "MIT",
+  "dependencies": {
+    "@xterm/xterm": "^5.5.0",
+    "sql.js": "^1.12.0",
+    "electron-store": "^8.2.0",
+    "openai": "^4.47.3",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@electron-forge/cli": "^7.4.0",
+    "@types/sql.js": "^1.4.9",
+    "@types/node": "^20.14.10",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@types/ws": "^8.5.11",
+    "@vitejs/plugin-react": "^4.3.1",
+    "concurrently": "^8.2.2",
+    "electron": "^31.3.1",
+    "electron-builder": "^24.13.3",
+    "typescript": "^5.5.3",
+    "vite": "^5.3.4",
+    "vite-plugin-electron": "^0.28.7",
+    "vite-plugin-electron-renderer": "^0.14.5",
+    "wait-on": "^7.2.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "build": {
+    "appId": "com.airevtool.app",
+    "productName": "AIrevtool",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "resources/icon.ico"
+    },
+    "extraResources": [
+      {
+        "from": "../x64dbg/bin/",
+        "to": "x64dbg/",
+        "filter": ["x64dbg.exe", "x32dbg.exe", "*.dll"]
+      }
+    ]
+  }
+}
