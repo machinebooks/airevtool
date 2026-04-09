@@ -3,6 +3,7 @@
 AIrevtool is a Windows-focused Electron application for AI-assisted reverse engineering and vulnerability triage. It combines a desktop UI, LM Studio for local inference, and an x64dbg plugin bridge to inspect live processes, review memory and disassembly, prioritize findings, generate safe PoC guidance, and export analyst reports.
 
 The project is intended to help researchers and developers inspect binaries faster while keeping a human in the loop.
+<img width="1729" height="940" alt="capture-1" src="https://github.com/user-attachments/assets/0ef9357d-4e7e-43ee-9bc9-e5f572acd864" />
 
 ## Current Release
 
