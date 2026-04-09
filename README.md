@@ -168,6 +168,8 @@ If any of these are missing, AIrevtool may still open, but memory/disassembly-ba
 
 1. Open AIrevtool.
 2. Go to Settings.
+<img width="1729" height="940" alt="capture-4" src="https://github.com/user-attachments/assets/a85ea882-9aef-4282-8282-8f56639441eb" />
+
 3. Confirm the LM Studio URL.
 4. Fetch available models.
 5. Choose the analysis model and embedding model.
@@ -175,8 +177,14 @@ If any of these are missing, AIrevtool may still open, but memory/disassembly-ba
 7. Click Browse and select a target binary.
 8. Click Load.
 9. Start analysis.
+<img width="1729" height="940" alt="capture-2" src="https://github.com/user-attachments/assets/dec3f33a-a0ff-4029-b793-9c78e72da2a2" />
+
 10. Optionally provide a custom analysis prompt.
+<img width="1600" height="900" alt="capture-6" src="https://github.com/user-attachments/assets/da1abd75-4826-4986-9acd-b6f69cd25d65" />
+
 11. Review findings, PoC guidance, and the generated report.
+<img width="1729" height="940" alt="capture-5" src="https://github.com/user-attachments/assets/d3993da3-0e09-4bac-a1d6-246e3d33624f" />
+
 
 ## Reports
 
