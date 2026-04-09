@@ -228,23 +228,6 @@ AIrevtool is designed for defensive research, internal validation, and review wo
 - The application is not intended to generate weaponized exploit payloads.
 - Always review AI output manually before acting on it.
 
-## Publishing to GitHub
-
-Recommended repository contents:
-
-- source code
-- this README
-- `LICENSE`
-- screenshots embedded from GitHub-hosted image URLs
-- a short contribution guide if you want outside collaborators to help
-
-Recommended repository policy:
-
-- publish source only
-- do not commit packaged installers or release artifacts
-- let contributors build locally from source
-- keep external dependencies such as x64dbg outside the repository itself
-
 ## Acknowledgements
 
 AIrevtool builds on top of the x64dbg ecosystem.
