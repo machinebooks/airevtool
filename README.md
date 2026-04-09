@@ -240,7 +240,7 @@ Recommended repository policy:
 
 AIrevtool builds on top of the x64dbg ecosystem.
 
-Many thanks to the x64dbg team for creating such an outstanding debugger and reverse engineering platform. Special thanks to DREG as well.
+Many thanks to DREG and the x64dbg team for creating such an outstanding debugger and reverse engineering platform.
 
 x64dbg remains its own project and keeps its own licensing and authorship.
 
