@@ -59,7 +59,9 @@ if ($SkipDeploy) {
 
 $deployDir = Split-Path -Parent $deployPath
 if (-not (Test-Path $deployDir)) {
-    throw "No se encontro el directorio de plugins de x64dbg: $deployDir"
+    Write-Warning "No se encontro el directorio de plugins de x64dbg: $deployDir"
+    Write-Host "Plugin compilado en $pluginOutput"
+    exit 0
 }
 
 Copy-Item $pluginOutput $deployPath -Force

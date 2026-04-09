@@ -23,7 +23,8 @@ let orchestrator: AgentOrchestrator
 let database: Database
 let reportFileService: ReportFileService
 
-const DEV = !app.isPackaged
+const rendererDevUrl = process.env.VITE_DEV_SERVER_URL || process.env.ELECTRON_RENDERER_URL
+const DEV = Boolean(rendererDevUrl)
 
 // ── Window ───────────────────────────────────────────────────
 
@@ -49,8 +50,8 @@ function createWindow() {
     },
   })
 
-  if (DEV) {
-    mainWindow.loadURL('http://localhost:5173')
+  if (DEV && rendererDevUrl) {
+    mainWindow.loadURL(rendererDevUrl)
   } else {
     mainWindow.loadFile(join(__dirname, '../../dist/index.html'))
   }

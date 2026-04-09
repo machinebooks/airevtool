@@ -126,13 +126,22 @@ What this does:
 - locates MSBuild
 - builds `x64dbg-plugin/build/AIrevPlugin.sln`
 - produces `AIrevPlugin.dp64`
-- deploys it to `../x64dbg/bin/plugins/AIrevPlugin.dp64`
+- if `../x64dbg/bin/plugins/` exists, deploys it there automatically
+- otherwise leaves the compiled plugin in `x64dbg-plugin/build/Release/AIrevPlugin.dp64` so you can copy it manually
 
 ### 4. Run the desktop app in development
 
 ```powershell
 npm run dev:electron
 ```
+
+### 4.1 Run the built app locally without packaging
+
+```powershell
+npm run start
+```
+
+This rebuilds the Electron main process and renderer, then launches the app from the local `dist` and `dist-electron` outputs.
 
 ### 5. Build a local packaged build
 
