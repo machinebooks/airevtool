@@ -145,8 +145,6 @@ export function DisasmView({ nodes, edges, currentAddress, breakpoints }: Props)
                     emptyMessage="No outgoing links registered yet."
                     onSelect={setSelectedNodeId}
                   />
-
-                  {viewMode === 'map' && <MapLegend />}
                 </>
               ) : (
                 <EmptyState message="Select a node to inspect incoming and outgoing links." />
@@ -403,6 +401,8 @@ function CallMapView({
                 type="button"
                 className={`disasm-callmap-node ${isCurrent ? 'current' : ''} ${isSelected ? 'selected' : ''}`}
                 style={{ left: `${item.x}px`, top: `${item.y}px` }}
+              onPointerDown={(event) => event.stopPropagation()}
+              onPointerUp={(event) => event.stopPropagation()}
                 onClick={() => handleNodeSelect(item.node.id)}
               >
                 <div className="disasm-callmap-node-title">{item.node.name}</div>
@@ -422,18 +422,20 @@ function CallMapView({
   )
 }
 
-function MapLegend() {
+export function DisasmMapLegend() {
   return (
-    <div className="disasm-relation-section">
-      <div className="disasm-relation-title">Map Legend</div>
+    <div className="panel disasm-map-legend-panel">
+    <div className="panel-header">Map Legend</div>
+    <div className="panel-body">
       <div className="disasm-map-legend">
-        <div><span className="disasm-map-legend-line" style={{ borderTopColor: 'var(--accent-blue)' }} />Call</div>
-        <div><span className="disasm-map-legend-line" style={{ borderTopColor: '#56D364' }} />JE / JZ</div>
-        <div><span className="disasm-map-legend-line" style={{ borderTopColor: '#F85149' }} />JNE / JNZ</div>
-        <div><span className="disasm-map-legend-line" style={{ borderTopColor: '#D29922' }} />Signed / Unsigned compares</div>
-        <div><span className="disasm-map-legend-line" style={{ borderTopColor: '#39C5CF' }} />Indirect / jump table</div>
-        <div><span className="disasm-map-legend-line" style={{ borderTopColor: 'var(--text-muted)' }} />Fallthrough</div>
+      <div><span className="disasm-map-legend-line" style={{ borderTopColor: 'var(--accent-blue)' }} />Call</div>
+      <div><span className="disasm-map-legend-line" style={{ borderTopColor: '#56D364' }} />JE / JZ</div>
+      <div><span className="disasm-map-legend-line" style={{ borderTopColor: '#F85149' }} />JNE / JNZ</div>
+      <div><span className="disasm-map-legend-line" style={{ borderTopColor: '#D29922' }} />Signed / Unsigned compares</div>
+      <div><span className="disasm-map-legend-line" style={{ borderTopColor: '#39C5CF' }} />Indirect / jump table</div>
+      <div><span className="disasm-map-legend-line" style={{ borderTopColor: 'var(--text-muted)' }} />Fallthrough</div>
       </div>
+    </div>
     </div>
   )
 }

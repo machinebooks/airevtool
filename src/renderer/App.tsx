@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { Toolbar } from './components/Toolbar'
-import { DisasmView } from './components/DisasmView'
+import { DisasmMapLegend, DisasmView } from './components/DisasmView'
 import { MemoryView } from './components/MemoryView'
 import { RegistersView } from './components/RegistersView'
 import { AgentDashboard } from './components/AgentDashboard'
@@ -357,6 +357,7 @@ export default function App() {
           <div className="sidebar-right">
             <RegistersView registers={dbgState?.registers ?? []} />
             <LogPanel logs={dbgLogs} title="Debugger Log" />
+            {activePanel === 'disasm' && <DisasmMapLegend />}
           </div>
         </div>
       </div>

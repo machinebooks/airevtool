@@ -127,7 +127,8 @@
   padding: 6px;
   border-left: 1px solid var(--border);
   flex-shrink: 0;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 /* ── Status bar ─────────────────────────────────────────────── */
@@ -511,11 +512,15 @@
 
 /* ── Log panel ──────────────────────────────────────────────── */
 .log-panel {
-  flex: 1;
+  flex: 1 1 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
   min-height: 120px;
+}
+
+.disasm-map-legend-panel {
+  flex-shrink: 0;
 }
 
 .log-list {
