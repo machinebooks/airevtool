@@ -21,7 +21,7 @@ const SEVERITY_COLORS: Record<string, string> = {
 export function FindingsPanel({ findings, sessionId, latestReport, onFindingUpdated }: Props) {
   const [selected, setSelected] = useState<Finding | null>(null)
   const [filter, setFilter] = useState<string>('all')
-  const [activeView, setActiveView] = useState<'finding' | 'report'>(latestReport ? 'report' : 'finding')
+  const [activeView, setActiveView] = useState<'finding' | 'report'>('finding')
 
   const api = (window as unknown as {
     api: {
@@ -43,8 +43,8 @@ export function FindingsPanel({ findings, sessionId, latestReport, onFindingUpda
   }
 
   useEffect(() => {
-    if (latestReport && !selected) setActiveView('report')
-  }, [latestReport, selected])
+    if (!latestReport && activeView === 'report') setActiveView('finding')
+  }, [activeView, latestReport])
 
   return (
     <div style={{ display: 'flex', gap: 6, flex: 1, overflow: 'hidden' }}>
@@ -367,6 +367,11 @@ function FormattedAnalysis({ content }: { content: string }) {
 
     const dataRows = rows.filter(row => !row.every(cell => /^-+$/.test(cell)))
     const [header, ...body] = dataRows
+
+    if (!header || header.length === 0) {
+      tableLines = []
+      return
+    }
 
     elements.push(
       <div key={`table-${elements.length}`} style={{ marginBottom: 10, overflowX: 'auto' }}>
