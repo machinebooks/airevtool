@@ -664,6 +664,16 @@
   word-break: break-all;
 }
 
+.disasm-node-summary {
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
 .disasm-node-flags {
   display: flex;
   gap: 6px;
@@ -838,6 +848,21 @@
   font-size: 11px;
   color: var(--text-muted);
   text-transform: uppercase;
+}
+
+.disasm-node-summary-panel {
+  margin-bottom: 16px;
+  padding: 12px;
+  border: 1px solid rgba(48, 54, 61, 0.75);
+  border-radius: 10px;
+  background: rgba(9, 14, 20, 0.72);
+}
+
+.disasm-node-summary-full {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
 }
 
 .disasm-relation-section {

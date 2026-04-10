@@ -125,6 +125,13 @@ export function DisasmView({ nodes, edges, currentAddress, breakpoints }: Props)
                     <div className="disasm-node-detail-status">{selectedNode.status}</div>
                   </div>
 
+                  {selectedNode.summary && (
+                    <div className="disasm-node-summary-panel">
+                      <div className="disasm-relation-title">Initial Review</div>
+                      <div className="disasm-node-summary-full">{selectedNode.summary}</div>
+                    </div>
+                  )}
+
                   <RelationSection
                     title="Called By"
                     relations={callers}
@@ -189,6 +196,7 @@ function NodeInspectorGrid({
               {hasBreakpoint && <span className="disasm-node-breakpoint">bp</span>}
             </div>
             <div className="disasm-node-title">{node.name}</div>
+            {node.summary && <div className="disasm-node-summary">{node.summary}</div>}
             <div className="disasm-node-address">{normalizeAddress(node.address)}</div>
             <div className="disasm-node-meta">
               <span>in {incomingCount}</span>

@@ -25,6 +25,7 @@ export interface DisasmGraphNode {
   id: string
   address: string
   name: string
+  summary?: string
   moduleName?: string
   kind: 'entry' | 'function' | 'import' | 'block'
   status: 'queued' | 'discovered' | 'analyzing' | 'analyzed'

@@ -26,6 +26,24 @@ let reportFileService: ReportFileService
 const rendererDevUrl = process.env.VITE_DEV_SERVER_URL || process.env.ELECTRON_RENDERER_URL
 const DEV = Boolean(rendererDevUrl)
 
+function sendToRenderer(channel: string, payload?: unknown): void {
+  const window = mainWindow
+  if (!window || window.isDestroyed()) return
+
+  const contents = window.webContents
+  if (contents.isDestroyed()) return
+
+  try {
+    contents.send(channel, payload)
+  } catch (error) {
+    const message = String(error)
+    if (message.includes('Render frame was disposed') || message.includes('WebContents was destroyed')) {
+      return
+    }
+    console.error(`Failed to send IPC event ${channel}:`, error)
+  }
+}
+
 // ── Window ───────────────────────────────────────────────────
 
 function createWindow() {
@@ -76,35 +94,35 @@ app.whenReady().then(async () => {
 
   dbgBridge = new X64DbgBridge()
   dbgBridge.on('paused', (info) => {
-    mainWindow?.webContents.send(IPC.DBG_EVENT_PAUSED, info)
+    sendToRenderer(IPC.DBG_EVENT_PAUSED, info)
   })
   dbgBridge.on('stopped', (info) => {
-    mainWindow?.webContents.send(IPC.DBG_EVENT_STOPPED, info)
+    sendToRenderer(IPC.DBG_EVENT_STOPPED, info)
     orchestrator?.onDebugStopped(info)
   })
   dbgBridge.on('log', (msg) => {
-    mainWindow?.webContents.send(IPC.DBG_EVENT_LOG, msg)
+    sendToRenderer(IPC.DBG_EVENT_LOG, msg)
   })
 
   orchestrator = new AgentOrchestrator(lmClient, dbgBridge, database, reportFileService)
   orchestrator.on('agent-log', (agentId, log) => {
-    mainWindow?.webContents.send(IPC.AGENT_LOG, { agentId, log })
+    sendToRenderer(IPC.AGENT_LOG, { agentId, log })
   })
   orchestrator.on('finding', (finding) => {
-    mainWindow?.webContents.send(IPC.AGENT_FINDING, finding)
+    sendToRenderer(IPC.AGENT_FINDING, finding)
     database.saveFinding(finding)
   })
   orchestrator.on('status', (status) => {
-    mainWindow?.webContents.send(IPC.AGENT_STATUS, status)
+    sendToRenderer(IPC.AGENT_STATUS, status)
   })
   orchestrator.on('disasm-graph-update', (update) => {
-    mainWindow?.webContents.send(IPC.AGENT_DISASM_GRAPH_UPDATE, update)
+    sendToRenderer(IPC.AGENT_DISASM_GRAPH_UPDATE, update)
   })
   orchestrator.on('report-generated', (report) => {
-    mainWindow?.webContents.send(IPC.REPORT_GENERATED, report)
+    sendToRenderer(IPC.REPORT_GENERATED, report)
   })
   orchestrator.on('global-analysis', (analysis) => {
-    mainWindow?.webContents.send('agent:global-analysis', analysis)
+    sendToRenderer('agent:global-analysis', analysis)
   })
 
   registerIPC()

@@ -55,6 +55,31 @@ interface GraphSuccessor {
   label?: string
 }
 
+interface InitialBlockReview {
+  suggestedName?: string
+  summary: string
+  hasUserInput: boolean
+  userInputSources: string[]
+  interesting: boolean
+  interestingReasons: string[]
+  shouldDeepAnalyze: boolean
+}
+
+interface DiscoveredBlock {
+  address: string
+  instructions: DisasmInstruction[]
+  moduleName?: string
+  kind: DisasmGraphNode['kind']
+  flags: string[]
+  successors: GraphSuccessor[]
+}
+
+interface DiscoveryWorkItem {
+  address: string
+  functionRoot: string
+  rootKind: DisasmGraphNode['kind']
+}
+
 export class DisasmAgent extends EventEmitter {
   private state: AgentState = {
     id: 'disasm',
@@ -114,22 +139,30 @@ export class DisasmAgent extends EventEmitter {
 
     // Shared work queue — starts with the RIP block, workers enqueue successors as they go
     // This is a concurrent BFS+analysis loop: fetch→ingest→analyze→enqueue successors
-    const workQueue: string[] = [startAddr, ...entryAddresses.filter(a => a !== startAddr)]
+    const workQueue: DiscoveryWorkItem[] = [
+      { address: startAddr, functionRoot: startAddr, rootKind: 'entry' },
+      ...entryAddresses
+        .filter(address => address !== startAddr)
+        .map(address => ({ address, functionRoot: address, rootKind: 'block' as const })),
+    ]
     const visited = new Set<string>()
-    let analyzed = 0
+    const discoveredBlocks = new Map<string, DiscoveredBlock>()
 
     const worker = async () => {
       while (!this.aborted) {
-        const address = workQueue.shift()
-        if (!address) {
+        const workItem = workQueue.shift()
+        if (!workItem) {
           // Yield briefly and retry — another worker may enqueue more
           await new Promise(r => setTimeout(r, 20))
           if (workQueue.length === 0) break
           continue
         }
 
-        if (visited.has(address)) continue
-        visited.add(address)
+        const { address, functionRoot, rootKind } = workItem
+        const visitKey = `${functionRoot}:${this.normalizeAddress(address)}`
+
+        if (visited.has(visitKey)) continue
+        visited.add(visitKey)
 
         const region = findRegionForAddress(regions, address)
         if (!region || visited.size > MAX_DISCOVERY_BLOCKS) continue
@@ -141,80 +174,73 @@ export class DisasmAgent extends EventEmitter {
         const block = await this.buildLogicalBlock(bounded, region, regions)
         if (block.length === 0) continue
 
-        const fnKey = block[0].address
-        if (this.analyzedFunctions.has(fnKey)) continue
-        this.analyzedFunctions.add(fnKey)
-
         const successors = this.extractSuccessors(block, regions)
-        const analyzableSuccessors = successors
-          .filter(successor => !successor.synthetic && !visited.has(successor.address))
-          .map(successor => successor.address)
+        const analyzableSuccessors = successors.filter(successor => !successor.synthetic)
+        const flags = this.heuristicCheck(block)
+        const existingBlock = discoveredBlocks.get(functionRoot)
+        const existingKind = this.graphNodes.get(functionRoot)?.kind
+        const kind = existingKind
+          ?? existingBlock?.kind
+          ?? rootKind
+
+        const mergedBlock: DiscoveredBlock = existingBlock
+          ? {
+              ...existingBlock,
+              kind,
+              moduleName: existingBlock.moduleName ?? moduleName,
+              instructions: this.mergeInstructions(existingBlock.instructions, block),
+              flags: [...new Set([...existingBlock.flags, ...flags])],
+              successors: this.mergeSuccessors(existingBlock.successors, successors.filter(successor => successor.edgeType === 'call')),
+            }
+          : {
+              address: functionRoot,
+              instructions: [...block],
+              moduleName,
+              kind,
+              flags: [...flags],
+              successors: successors.filter(successor => successor.edgeType === 'call'),
+            }
+
+        discoveredBlocks.set(functionRoot, mergedBlock)
+        this.analyzedFunctions.add(functionRoot)
 
         this.upsertGraphNode({
-          id: fnKey,
-          address: fnKey,
-          name: this.deriveFunctionName(block),
-          moduleName,
-          kind: fnKey === startAddr ? 'entry' : this.inferNodeKind(block),
+          id: functionRoot,
+          address: functionRoot,
+          name: this.deriveFunctionName(mergedBlock.instructions),
+          summary: undefined,
+          moduleName: mergedBlock.moduleName,
+          kind,
           status: 'discovered',
-          flags: [],
+          flags: mergedBlock.flags,
         })
 
         // Ingest block into RAG immediately so siblings can use it as context
         await this.rag.ingestCodeBlocks([block], this.sessionId, moduleName).catch(() => {})
 
-        if (this.isTrivialBlock(block)) {
-          const last = block[block.length - 1]
-          const isCall = last?.mnemonic.toLowerCase() === 'call'
-          this.registerGraphEdges(fnKey, successors, moduleName)
-          if (isCall) workQueue.unshift(...analyzableSuccessors)
-          else workQueue.push(...analyzableSuccessors)
+        const callSuccessors = analyzableSuccessors.filter(successor => successor.edgeType === 'call')
+        const internalSuccessors = analyzableSuccessors.filter(successor => successor.edgeType !== 'call')
 
-          this.upsertGraphNode({
-            id: fnKey,
-            address: fnKey,
-            name: this.deriveFunctionName(block),
-            moduleName,
-            kind: fnKey === startAddr ? 'entry' : this.inferNodeKind(block),
-            status: 'analyzed',
-            flags: ['thunk'],
+        this.registerGraphEdges(functionRoot, callSuccessors, moduleName)
+
+        for (const successor of callSuccessors) {
+          const callVisitKey = `${successor.address}:${this.normalizeAddress(successor.address)}`
+          if (visited.has(callVisitKey)) continue
+          workQueue.unshift({
+            address: successor.address,
+            functionRoot: successor.address,
+            rootKind: 'function',
           })
-          continue
         }
 
-        // Enqueue successors — calls go to front (depth-first), branches to back
-        const last = block[block.length - 1]
-        const isCall = last?.mnemonic.toLowerCase() === 'call'
-        this.registerGraphEdges(fnKey, successors, moduleName)
-        if (isCall) workQueue.unshift(...analyzableSuccessors)
-        else workQueue.push(...analyzableSuccessors)
-
-        const flags = this.heuristicCheck(block)
-        this.upsertGraphNode({ id: fnKey, address: fnKey, name: this.deriveFunctionName(block), moduleName, kind: fnKey === startAddr ? 'entry' : this.inferNodeKind(block), status: 'analyzing', flags })
-        if (flags.length > 0) {
-          this.emit('memory-request', { address: fnKey, reason: flags.join(', ') })
-        }
-
-        analyzed++
-        this.setState({
-          progress: Math.min(99, Math.round(5 + (analyzed / Math.max(analyzed + workQueue.length, 1)) * 94)),
-          currentTask: `Analyzing @ ${fnKey} (${analyzed} done, ${workQueue.length} queued)`,
-        })
-
-        try {
-          const analysis = await this.analyzeFunction(block, fnKey, flags, moduleName)
-          this.upsertGraphNode({
-            id: fnKey,
-            address: fnKey,
-            name: analysis.suggestedName ?? this.deriveFunctionName(block),
-            moduleName,
-            kind: fnKey === startAddr ? 'entry' : this.inferNodeKind(block),
-            status: 'analyzed',
-            flags,
+        for (const successor of internalSuccessors) {
+          const branchVisitKey = `${functionRoot}:${this.normalizeAddress(successor.address)}`
+          if (visited.has(branchVisitKey)) continue
+          workQueue.push({
+            address: successor.address,
+            functionRoot,
+            rootKind: kind,
           })
-        } catch (error) {
-          this.log('error', `Block analysis failed @ ${fnKey}: ${String(error).slice(0, 160)}`)
-          this.upsertGraphNode({ id: fnKey, address: fnKey, name: this.deriveFunctionName(block), moduleName, kind: fnKey === startAddr ? 'entry' : this.inferNodeKind(block), status: 'analyzed', flags: [...new Set([...flags, 'analysis-error'])] })
         }
       }
     }
@@ -223,18 +249,170 @@ export class DisasmAgent extends EventEmitter {
     const workers = Array.from({ length: this.analysisWorkers }, worker)
     await Promise.all(workers)
 
+    const trivialBlocks = [...discoveredBlocks.values()].filter(block => this.isTrivialBlock(block.instructions))
+    for (const block of trivialBlocks) {
+      this.upsertGraphNode({
+        id: block.address,
+        address: block.address,
+        name: this.deriveFunctionName(block.instructions),
+        summary: 'Trivial thunk or trampoline block.',
+        moduleName: block.moduleName,
+        kind: block.kind,
+        status: 'analyzed',
+        flags: [...new Set([...block.flags, 'thunk'])],
+      })
+    }
+
+    const reviewableBlocks = [...discoveredBlocks.values()].filter(block => !this.isTrivialBlock(block.instructions))
+    this.log('info', `Initial function review phase: ${reviewableBlocks.length} blocks queued`)
+    this.setState({ status: 'running', currentTask: `Initial review of ${reviewableBlocks.length} blocks`, progress: 35 })
+
+    let reviewed = 0
+    const deepCandidates = new Map<string, DiscoveredBlock>()
+
+    await this.processBlocksConcurrently(reviewableBlocks, async (block) => {
+      if (this.aborted) return
+
+      const review = await this.reviewFunction(block.instructions, block.address, block.flags, block.moduleName)
+      const mergedFlags = [...new Set([...block.flags, ...this.buildReviewFlags(review)])]
+
+      this.upsertGraphNode({
+        id: block.address,
+        address: block.address,
+        name: review.suggestedName ?? this.deriveFunctionName(block.instructions),
+        summary: review.summary,
+        moduleName: block.moduleName,
+        kind: block.kind,
+        status: 'discovered',
+        flags: mergedFlags,
+      })
+
+      if (review.hasUserInput) {
+        this.emit('memory-request', { address: block.address, reason: ['USER_INPUT', ...review.userInputSources].join(', ') })
+      } else if (block.flags.length > 0) {
+        this.emit('memory-request', { address: block.address, reason: block.flags.join(', ') })
+      }
+
+      if (this.shouldDeepAnalyzeBlock(block.flags, review)) {
+        deepCandidates.set(block.address, block)
+      }
+
+      reviewed++
+      this.setState({
+        progress: Math.min(70, Math.round(35 + (reviewed / Math.max(reviewableBlocks.length, 1)) * 35)),
+        currentTask: `Initial review @ ${block.address} (${reviewed}/${reviewableBlocks.length})`,
+      })
+    })
+
+    const deepBlocks = reviewableBlocks.filter(block => deepCandidates.has(block.address))
+    this.log('info', `Deep analysis phase: ${deepBlocks.length} selected blocks (${reviewableBlocks.length - deepBlocks.length} triaged only)`)
+    this.setState({ status: 'running', currentTask: `Deep analysis of ${deepBlocks.length} selected blocks`, progress: 72 })
+
+    let analyzed = 0
+    await this.processBlocksConcurrently(deepBlocks, async (block) => {
+      if (this.aborted) return
+
+      this.upsertGraphNode({
+        id: block.address,
+        address: block.address,
+        name: this.graphNodes.get(block.address)?.name ?? this.deriveFunctionName(block.instructions),
+        summary: this.graphNodes.get(block.address)?.summary,
+        moduleName: block.moduleName,
+        kind: block.kind,
+        status: 'analyzing',
+        flags: this.graphNodes.get(block.address)?.flags ?? block.flags,
+      })
+
+      try {
+        const analysis = await this.analyzeFunction(block.instructions, block.address, this.graphNodes.get(block.address)?.flags ?? block.flags, block.moduleName)
+        this.upsertGraphNode({
+          id: block.address,
+          address: block.address,
+          name: analysis.suggestedName ?? this.graphNodes.get(block.address)?.name ?? this.deriveFunctionName(block.instructions),
+          summary: this.graphNodes.get(block.address)?.summary,
+          moduleName: block.moduleName,
+          kind: block.kind,
+          status: 'analyzed',
+          flags: this.graphNodes.get(block.address)?.flags ?? block.flags,
+        })
+      } catch (error) {
+        this.log('error', `Block analysis failed @ ${block.address}: ${String(error).slice(0, 160)}`)
+        this.upsertGraphNode({
+          id: block.address,
+          address: block.address,
+          name: this.graphNodes.get(block.address)?.name ?? this.deriveFunctionName(block.instructions),
+          summary: this.graphNodes.get(block.address)?.summary,
+          moduleName: block.moduleName,
+          kind: block.kind,
+          status: 'analyzed',
+          flags: [...new Set([...(this.graphNodes.get(block.address)?.flags ?? block.flags), 'analysis-error'])],
+        })
+      }
+
+      analyzed++
+      this.setState({
+        progress: Math.min(99, Math.round(72 + (analyzed / Math.max(deepBlocks.length, 1)) * 27)),
+        currentTask: `Deep analysis @ ${block.address} (${analyzed}/${deepBlocks.length})`,
+      })
+    })
+
     this.setState({ status: 'idle', progress: 100, currentTask: `Disasm analysis complete — ${analyzed} blocks` })
-    this.log('info', `Disasm analysis complete — ${analyzed} blocks analyzed`)
+    this.log('info', `Disasm analysis complete — ${reviewableBlocks.length} reviewed, ${deepBlocks.length} deeply analyzed`)
+  }
+
+  private async processBlocksConcurrently(blocks: DiscoveredBlock[], handler: (block: DiscoveredBlock) => Promise<void>): Promise<void> {
+    const queue = [...blocks]
+    const worker = async () => {
+      while (!this.aborted) {
+        const block = queue.shift()
+        if (!block) return
+        await handler(block)
+      }
+    }
+
+    await Promise.all(Array.from({ length: Math.min(this.analysisWorkers, Math.max(queue.length, 1)) }, worker))
+  }
+
+  private mergeInstructions(existing: DisasmInstruction[], incoming: DisasmInstruction[]): DisasmInstruction[] {
+    const seen = new Set(existing.map(instruction => this.normalizeAddress(instruction.address)))
+    const merged = [...existing]
+
+    for (const instruction of incoming) {
+      const address = this.normalizeAddress(instruction.address)
+      if (seen.has(address)) continue
+      seen.add(address)
+      merged.push(instruction)
+    }
+
+    return merged
+  }
+
+  private mergeSuccessors(existing: GraphSuccessor[], incoming: GraphSuccessor[]): GraphSuccessor[] {
+    const merged = new Map<string, GraphSuccessor>()
+
+    for (const successor of [...existing, ...incoming]) {
+      const key = `${successor.address}:${successor.edgeType}:${successor.mnemonic}:${successor.resolution}`
+      merged.set(key, successor)
+    }
+
+    return [...merged.values()]
   }
 
   private registerGraphEdges(fromAddress: string, successors: GraphSuccessor[], moduleName?: string): void {
     for (const successor of successors) {
+      const existingKind = this.graphNodes.get(successor.address)?.kind
+      const nextKind: DisasmGraphNode['kind'] = existingKind === 'entry' || existingKind === 'function'
+        ? existingKind
+        : successor.edgeType === 'call'
+          ? 'function'
+          : 'block'
+
       this.upsertGraphNode({
         id: successor.address,
         address: successor.address,
         name: successor.label ?? this.deriveSyntheticTargetName(successor),
         moduleName,
-        kind: successor.edgeType === 'call' ? 'function' : 'block',
+        kind: nextKind,
         status: successor.synthetic ? 'discovered' : 'queued',
         flags: [],
       })
@@ -296,13 +474,6 @@ export class DisasmAgent extends EventEmitter {
     if (successor.resolution === 'indirect') return `indirect_${successor.mnemonic} @ ${successor.address}`
     if (successor.resolution === 'fallthrough') return `fallthrough_${this.stripHexPrefix(successor.address).padStart(8, '0')}`
     return `sub_${this.stripHexPrefix(successor.address).padStart(8, '0')}`
-  }
-
-  private inferNodeKind(block: DisasmInstruction[]): DisasmGraphNode['kind'] {
-    const last = block[block.length - 1]?.mnemonic.toLowerCase() ?? ''
-    if (last === 'call') return 'function'
-    if (block.some(instruction => DANGEROUS_MNEMONICS.has(instruction.mnemonic.toLowerCase()))) return 'function'
-    return 'block'
   }
 
   private stripHexPrefix(address: string): string {
@@ -533,6 +704,69 @@ export class DisasmAgent extends EventEmitter {
     }
   }
 
+  private async reviewFunction(
+    instructions: DisasmInstruction[],
+    address: string,
+    flags: string[],
+    moduleName?: string,
+  ): Promise<InitialBlockReview> {
+    const listing = instructions
+      .map(i => `${i.address}  ${i.bytes.padEnd(20)}  ${i.mnemonic} ${i.operands}${i.comment ? `  ; ${i.comment}` : ''}`)
+      .join('\n')
+
+    const calleeAddresses = instructions
+      .filter(i => i.mnemonic.toLowerCase() === 'call' || i.mnemonic.toLowerCase() === 'jmp')
+      .map(i => this.extractDirectTarget(i))
+      .filter((a): a is string => a !== null)
+
+    const [callerCtx, calleeCtx, peerCtx] = await Promise.all([
+      this.rag.buildContext(`call target ${address} caller`, this.sessionId, 4, 'disasm', moduleName).catch(() => ''),
+      calleeAddresses.length > 0
+        ? this.rag.buildContext(calleeAddresses.join(' '), this.sessionId, 4, 'disasm', moduleName).catch(() => '')
+        : Promise.resolve(''),
+      this.rag.buildContext(
+        flags.length > 0 ? flags.join(' ') : `function block ${address}`,
+        this.sessionId, 4, 'disasm', moduleName,
+      ).catch(() => ''),
+    ])
+
+    this.log('info', `Initial review @ ${address}`)
+    this.setState({ status: 'waiting', currentTask: `Model reviewing block @ ${address}` })
+
+    const timeout = new Promise<null>(resolve => setTimeout(() => resolve(null), BLOCK_TIMEOUT_MS))
+    const result = await Promise.race([
+      this.lm.analyzeBlock({
+        address,
+        listing,
+        heuristicFlags: flags,
+        callers: callerCtx,
+        callees: calleeCtx,
+        relatedBlocks: peerCtx,
+        analystPrompt: this.analysisGuidance,
+      }),
+      timeout,
+    ])
+
+    if (result === null) {
+      this.log('warn', `Initial review timed out @ ${address}`)
+      return {
+        summary: 'Initial review timed out.',
+        hasUserInput: false,
+        userInputSources: [],
+        interesting: flags.length > 0,
+        interestingReasons: flags,
+        shouldDeepAnalyze: flags.length > 0,
+      }
+    }
+
+    const sections = this.parseSections(result.content)
+    const parsed = this.buildInitialReviewFromSections(sections, address, flags)
+    if (parsed.summary) {
+      this.log('info', `Review @ ${address}: ${parsed.summary.slice(0, 120)}`)
+    }
+    return parsed
+  }
+
   private async analyzeFunction(
     instructions: DisasmInstruction[],
     address: string,
@@ -625,6 +859,123 @@ export class DisasmAgent extends EventEmitter {
 
   private sectionKey(header: string): string {
     return header.toLowerCase().replace(/\s+/g, '')
+  }
+
+  private buildInitialReviewFromSections(
+    sections: Record<string, string>,
+    address: string,
+    flags: string[],
+  ): InitialBlockReview {
+    const suggestedName = this.deriveSemanticBlockName(sections, address)
+    const purpose = (sections.purpose ?? '').replace(/^(name|label)\s*:[^\n]*\n?/i, '').trim()
+    const controlFlow = (sections.controlflow ?? '').trim()
+    const security = (sections.securityassessment ?? '').trim()
+    const inputs = (sections.inputs ?? '').trim()
+    const dataFlow = (sections.dataflow ?? '').trim()
+    const summary = purpose || controlFlow || security || 'Initial review unavailable.'
+
+    const userInputText = [inputs, dataFlow, security].join('\n').toLowerCase()
+    const userInputSources = this.extractUserInputSources(userInputText)
+    const hasUserInput = userInputSources.length > 0 || this.containsUserInputIndicators(userInputText)
+
+    const interestingReasons = this.collectInterestingReasons(flags, security, controlFlow, dataFlow)
+    const interesting = interestingReasons.length > 0
+
+    return {
+      suggestedName,
+      summary,
+      hasUserInput,
+      userInputSources,
+      interesting,
+      interestingReasons,
+      shouldDeepAnalyze: hasUserInput || interesting,
+    }
+  }
+
+  private containsUserInputIndicators(text: string): boolean {
+    return [
+      'user input',
+      'attacker-reachable',
+      'attacker controlled',
+      'attacker-controlled',
+      'network input',
+      'file input',
+      'ipc input',
+      'untrusted input',
+      'external input',
+      'command line',
+      'argv',
+      'stdin',
+    ].some(marker => text.includes(marker))
+  }
+
+  private extractUserInputSources(text: string): string[] {
+    const sources = new Set<string>()
+    const sourceHints: Array<[string, string[]]> = [
+      ['network', ['network', 'socket', 'recv', 'send', 'http', 'wsarecv', 'internet']],
+      ['file', ['file', 'fread', 'readfile', 'createfile', 'mapviewoffile', 'ifstream']],
+      ['ipc', ['ipc', 'pipe', 'named pipe', 'shared memory', 'rpc', 'com']],
+      ['command-line', ['command line', 'argv', 'argc', 'getcommandline', 'commandline']],
+      ['stdin', ['stdin', 'console input', 'readconsole', 'getc', 'fgets']],
+      ['ui', ['window message', 'dialog', 'edit control', 'getdlgitemtext', 'wm_command']],
+      ['registry', ['registry', 'regqueryvalue', 'reggetvalue']],
+      ['environment', ['environment', 'getenvironmentvariable', 'getenv']],
+    ]
+
+    for (const [label, markers] of sourceHints) {
+      if (markers.some(marker => text.includes(marker))) {
+        sources.add(label)
+      }
+    }
+
+    return [...sources]
+  }
+
+  private collectInterestingReasons(flags: string[], security: string, controlFlow: string, dataFlow: string): string[] {
+    const reasons = new Set<string>()
+
+    for (const flag of flags) reasons.add(flag)
+
+    const combined = `${security}\n${controlFlow}\n${dataFlow}`.toLowerCase()
+    const semanticMarkers: Array<[string, string[]]> = [
+      ['anti-debug', ['anti-debug', 'anti analysis', 'anti-analysis', 'anti vm', 'anti-vm']],
+      ['memory-risk', ['overflow', 'oob', 'out-of-bounds', 'use-after-free', 'uaf', 'arbitrary write', 'arbitrary read']],
+      ['privileged-path', ['privilege', 'token', 'credential', 'secret', 'decrypt', 'crypt', 'process injection']],
+      ['evasive-control-flow', ['dispatcher', 'indirect branch', 'jump table', 'opaque predicate', 'unreachable']],
+    ]
+
+    for (const [reason, markers] of semanticMarkers) {
+      if (markers.some(marker => combined.includes(marker))) {
+        reasons.add(reason)
+      }
+    }
+
+    return [...reasons]
+  }
+
+  private buildReviewFlags(review: InitialBlockReview): string[] {
+    const flags: string[] = []
+    if (review.hasUserInput) flags.push('USER_INPUT')
+    for (const source of review.userInputSources) {
+      flags.push(`USER_INPUT_SOURCE:${source.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}`)
+    }
+    if (review.interesting) flags.push('TRIAGE_INTERESTING')
+    if (review.shouldDeepAnalyze) flags.push('DEEP_ANALYSIS_CANDIDATE')
+    return flags
+  }
+
+  private shouldDeepAnalyzeBlock(flags: string[], review: InitialBlockReview): boolean {
+    if (review.hasUserInput || review.shouldDeepAnalyze) return true
+    if (review.interesting) return true
+
+    return flags.some(flag =>
+      flag.startsWith('DANGEROUS_API:')
+      || flag.startsWith('ANTI_DEBUG_')
+      || flag === 'INDIRECT_CALL'
+      || flag === 'LARGE_STACK_ALLOC'
+      || flag === 'UNBALANCED_RET'
+      || flag === 'CONTROL_FLOW_BRANCH'
+    )
   }
 
   private deriveSemanticBlockName(sections: Record<string, string>, address: string): string | undefined {
