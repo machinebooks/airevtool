@@ -23,10 +23,28 @@ const DANGEROUS_APIS = [
   'VirtualAlloc', 'VirtualProtect',
   'WriteProcessMemory',
 ]
+const ANTI_DEBUG_APIS = [
+  'IsDebuggerPresent',
+  'CheckRemoteDebuggerPresent',
+  'NtQueryInformationProcess',
+  'ZwQueryInformationProcess',
+  'NtSetInformationThread',
+  'ZwSetInformationThread',
+  'OutputDebugString',
+  'DbgBreakPoint',
+  'DbgUiRemoteBreakin',
+  'FindWindow',
+  'ProcessDebugPort',
+  'ProcessDebugFlags',
+  'ProcessDebugObjectHandle',
+  'ThreadHideFromDebugger',
+]
+const ANTI_DEBUG_MNEMONICS = new Set(['rdtsc', 'rdpmc', 'cpuid', 'int1', 'int3', 'icebp'])
 const DISCOVERY_CHUNK_SIZE = 96
 const MAX_DISCOVERY_BLOCKS = 12000
 const MIN_BLOCK_INSTRUCTIONS = 4   // skip trivial blocks below this size
 const BLOCK_TIMEOUT_MS = 90_000    // per-block model timeout
+const MAX_INLINE_JUMP_DEPTH = 8
 
 interface GraphSuccessor {
   address: string
@@ -120,12 +138,17 @@ export class DisasmAgent extends EventEmitter {
         const chunk = await this.dbg.disassemble(address, DISCOVERY_CHUNK_SIZE).catch(() => [])
         const bounded = this.trimToRegion(chunk, region)
         if (bounded.length === 0) continue
-        const block = this.sliceBasicBlock(bounded)
-        if (block.length === 0 || this.isTrivialBlock(block)) continue
+        const block = await this.buildLogicalBlock(bounded, region, regions)
+        if (block.length === 0) continue
 
         const fnKey = block[0].address
         if (this.analyzedFunctions.has(fnKey)) continue
         this.analyzedFunctions.add(fnKey)
+
+        const successors = this.extractSuccessors(block, regions)
+        const analyzableSuccessors = successors
+          .filter(successor => !successor.synthetic && !visited.has(successor.address))
+          .map(successor => successor.address)
 
         this.upsertGraphNode({
           id: fnKey,
@@ -140,13 +163,28 @@ export class DisasmAgent extends EventEmitter {
         // Ingest block into RAG immediately so siblings can use it as context
         await this.rag.ingestCodeBlocks([block], this.sessionId, moduleName).catch(() => {})
 
+        if (this.isTrivialBlock(block)) {
+          const last = block[block.length - 1]
+          const isCall = last?.mnemonic.toLowerCase() === 'call'
+          this.registerGraphEdges(fnKey, successors, moduleName)
+          if (isCall) workQueue.unshift(...analyzableSuccessors)
+          else workQueue.push(...analyzableSuccessors)
+
+          this.upsertGraphNode({
+            id: fnKey,
+            address: fnKey,
+            name: this.deriveFunctionName(block),
+            moduleName,
+            kind: fnKey === startAddr ? 'entry' : this.inferNodeKind(block),
+            status: 'analyzed',
+            flags: ['thunk'],
+          })
+          continue
+        }
+
         // Enqueue successors — calls go to front (depth-first), branches to back
         const last = block[block.length - 1]
         const isCall = last?.mnemonic.toLowerCase() === 'call'
-        const successors = this.extractSuccessors(block, regions)
-        const analyzableSuccessors = successors
-          .filter(successor => !successor.synthetic && !visited.has(successor.address))
-          .map(successor => successor.address)
         this.registerGraphEdges(fnKey, successors, moduleName)
         if (isCall) workQueue.unshift(...analyzableSuccessors)
         else workQueue.push(...analyzableSuccessors)
@@ -164,8 +202,16 @@ export class DisasmAgent extends EventEmitter {
         })
 
         try {
-          await this.analyzeFunction(block, fnKey, flags, moduleName)
-          this.upsertGraphNode({ id: fnKey, address: fnKey, name: this.deriveFunctionName(block), moduleName, kind: fnKey === startAddr ? 'entry' : this.inferNodeKind(block), status: 'analyzed', flags })
+          const analysis = await this.analyzeFunction(block, fnKey, flags, moduleName)
+          this.upsertGraphNode({
+            id: fnKey,
+            address: fnKey,
+            name: analysis.suggestedName ?? this.deriveFunctionName(block),
+            moduleName,
+            kind: fnKey === startAddr ? 'entry' : this.inferNodeKind(block),
+            status: 'analyzed',
+            flags,
+          })
         } catch (error) {
           this.log('error', `Block analysis failed @ ${fnKey}: ${String(error).slice(0, 160)}`)
           this.upsertGraphNode({ id: fnKey, address: fnKey, name: this.deriveFunctionName(block), moduleName, kind: fnKey === startAddr ? 'entry' : this.inferNodeKind(block), status: 'analyzed', flags: [...new Set([...flags, 'analysis-error'])] })
@@ -277,6 +323,48 @@ export class DisasmAgent extends EventEmitter {
     })
   }
 
+  private async buildLogicalBlock(
+    instructions: DisasmInstruction[],
+    region: MemoryRegion,
+    regions: MemoryRegion[],
+  ): Promise<DisasmInstruction[]> {
+    const block = this.sliceBasicBlock(instructions)
+    if (block.length === 0) return block
+
+    const merged = [...block]
+    const visitedTargets = new Set<string>(merged.map(instruction => this.normalizeAddress(instruction.address)))
+
+    for (let depth = 0; depth < MAX_INLINE_JUMP_DEPTH; depth++) {
+      const last = merged[merged.length - 1]
+      if (!last || !this.shouldInlineJump(last, regions)) break
+
+      const target = this.extractDirectTarget(last)
+      if (!target || visitedTargets.has(target)) break
+
+      const targetRegion = findRegionForAddress(regions, target)
+      if (!targetRegion || !isSameModule(targetRegion.moduleName, region.moduleName)) break
+
+      const chunk = await this.dbg.disassemble(target, DISCOVERY_CHUNK_SIZE).catch(() => [])
+      const bounded = this.trimToRegion(chunk, targetRegion)
+      if (bounded.length === 0) break
+
+      const targetBlock = this.sliceBasicBlock(bounded)
+      if (targetBlock.length === 0) break
+
+      const freshInstructions = targetBlock.filter(instruction => {
+        const address = this.normalizeAddress(instruction.address)
+        if (visitedTargets.has(address)) return false
+        visitedTargets.add(address)
+        return true
+      })
+
+      if (freshInstructions.length === 0) break
+      merged.push(...freshInstructions)
+    }
+
+    return merged
+  }
+
   private sliceBasicBlock(instructions: DisasmInstruction[]): DisasmInstruction[] {
     const block: DisasmInstruction[] = []
 
@@ -288,6 +376,16 @@ export class DisasmAgent extends EventEmitter {
     }
 
     return block
+  }
+
+  private shouldInlineJump(instruction: DisasmInstruction, regions: MemoryRegion[]): boolean {
+    if (instruction.mnemonic.toLowerCase() !== 'jmp') return false
+    if (this.isIndirectControlTransfer(instruction)) return false
+
+    const target = this.extractDirectTarget(instruction)
+    if (!target) return false
+
+    return Boolean(findRegionForAddress(regions, target))
   }
 
   private extractSuccessors(block: DisasmInstruction[], regions: MemoryRegion[]): GraphSuccessor[] {
@@ -324,8 +422,7 @@ export class DisasmAgent extends EventEmitter {
 
   private extractDirectTarget(instruction: DisasmInstruction): string | null {
     const candidate = `${instruction.operands} ${instruction.comment ?? ''}`
-    const match = candidate.match(/0x[0-9a-f]+/i)
-    return match ? match[0] : null
+    return this.extractCandidateAddresses(candidate)[0] ?? null
   }
 
   private resolveBranchTargets(instruction: DisasmInstruction, regions: MemoryRegion[]): GraphSuccessor[] {
@@ -337,7 +434,7 @@ export class DisasmAgent extends EventEmitter {
     const edgeType: DisasmGraphEdge['type'] = mnemonic === 'call' ? 'call' : 'jump'
     const isIndirect = this.isIndirectControlTransfer(instruction)
     const isJumpTable = this.looksLikeJumpTable(instruction)
-    const explicitAddresses = [...new Set(Array.from(source.matchAll(/0x[0-9a-f]+/ig)).map(match => this.normalizeAddress(match[0])))]
+    const explicitAddresses = this.extractCandidateAddresses(source)
 
     if (!isIndirect) {
       return explicitAddresses
@@ -389,6 +486,27 @@ export class DisasmAgent extends EventEmitter {
     return `${instruction.mnemonic.toLowerCase()} indirect ${cleanedOperand || this.normalizeAddress(baseAddress)}`
   }
 
+  private extractCandidateAddresses(source: string): string[] {
+    const normalized = source.trim()
+    if (!normalized) return []
+
+    const matches = new Set<string>()
+
+    for (const match of normalized.matchAll(/0x[0-9a-f]+/ig)) {
+      matches.add(this.normalizeAddress(match[0]))
+    }
+
+    for (const match of normalized.matchAll(/\b[a-z_?$@][\w?$@-]*\.(?:text:)?([0-9a-f]{6,16})\b/ig)) {
+      matches.add(this.normalizeAddress(`0x${match[1]}`))
+    }
+
+    for (const match of normalized.matchAll(/\b(?:short|near|far|loc_|sub_)?([0-9a-f]{6,16})h?\b/ig)) {
+      matches.add(this.normalizeAddress(`0x${match[1]}`))
+    }
+
+    return [...matches]
+  }
+
   private nextInstructionAddress(instruction: DisasmInstruction): string | null {
     const size = this.instructionSize(instruction)
     return this.addOffset(instruction.address, size)
@@ -420,7 +538,7 @@ export class DisasmAgent extends EventEmitter {
     address: string,
     flags: string[],
     moduleName?: string,
-  ): Promise<void> {
+  ): Promise<{ suggestedName?: string }> {
     const listing = instructions
       .map(i => `${i.address}  ${i.bytes.padEnd(20)}  ${i.mnemonic} ${i.operands}${i.comment ? `  ; ${i.comment}` : ''}`)
       .join('\n')
@@ -459,12 +577,13 @@ export class DisasmAgent extends EventEmitter {
     if (result === null) {
       this.log('warn', `Block @ ${address} timed out after ${BLOCK_TIMEOUT_MS / 1000}s — skipping`)
       this.setState({ status: 'running', currentTask: `Timed out @ ${address}, continuing` })
-      return
+      return {}
     }
 
     this.setState({ status: 'running', currentTask: `Processing analysis @ ${address}` })
 
     const sections = this.parseSections(result.content)
+    const suggestedName = this.deriveSemanticBlockName(sections, address)
     const findings = this.parseFindings(sections.findings ?? '', instructions, address, flags, sections)
     for (const f of findings) {
       this.state.findings.push(f)
@@ -480,6 +599,8 @@ export class DisasmAgent extends EventEmitter {
     if (findings.length === 0 && sections.securityassessment) {
       this.log('info', `Assessment @ ${address}: ${sections.securityassessment.slice(0, 120).replace(/\n/g, ' ')}…`)
     }
+
+    return suggestedName ? { suggestedName } : {}
   }
 
   // ── Section parser ───────────────────────────────────────────
@@ -504,6 +625,58 @@ export class DisasmAgent extends EventEmitter {
 
   private sectionKey(header: string): string {
     return header.toLowerCase().replace(/\s+/g, '')
+  }
+
+  private deriveSemanticBlockName(sections: Record<string, string>, address: string): string | undefined {
+    const purpose = sections.purpose ?? ''
+    const purposeLines = purpose
+      .split('\n')
+      .map(line => line.trim())
+      .filter(Boolean)
+
+    const labeledLine = purposeLines.find(line => /^name\s*:/i.test(line) || /^label\s*:/i.test(line))
+    if (labeledLine) {
+      const extracted = labeledLine.replace(/^(name|label)\s*:/i, '').trim()
+      const normalized = this.normalizeSemanticBlockName(extracted, address)
+      if (normalized) return normalized
+    }
+
+    const firstSentence = purpose.replace(/\s+/g, ' ').trim().split(/[.!?]/)[0]?.trim()
+    const normalized = this.normalizeSemanticBlockName(firstSentence, address)
+    if (normalized) return normalized
+
+    return undefined
+  }
+
+  private normalizeSemanticBlockName(candidate: string | undefined, address: string): string | undefined {
+    if (!candidate) return undefined
+
+    let normalized = candidate
+      .replace(/^this block\s+/i, '')
+      .replace(/^the block\s+/i, '')
+      .replace(/^block\s+/i, '')
+      .replace(/^function\s+/i, '')
+      .replace(/^routine\s+/i, '')
+      .replace(/^is\s+/i, '')
+      .trim()
+
+    if (!normalized || /^unknown$/i.test(normalized) || /^n\/a$/i.test(normalized)) return undefined
+
+    normalized = normalized
+      .replace(/[`"']/g, '')
+      .replace(/\s*@\s*0x[0-9a-f]+/i, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+
+    if (!normalized || normalized.length < 4) return undefined
+    if (/^sub_[0-9a-f]+$/i.test(normalized)) return undefined
+
+    if (normalized.length > 72) {
+      normalized = normalized.slice(0, 72).replace(/[\s,;:-]+$/g, '').trim()
+    }
+
+    if (!/[A-Za-z]/.test(normalized) || normalized.toLowerCase() === address.toLowerCase()) return undefined
+    return normalized
   }
 
   private parseFindings(
@@ -567,6 +740,23 @@ export class DisasmAgent extends EventEmitter {
             flags.push(`DANGEROUS_API:${api}`)
           }
         }
+        for (const api of ANTI_DEBUG_APIS) {
+          if (target.includes(api.toLowerCase())) {
+            flags.push(`ANTI_DEBUG_API:${api}`)
+          }
+        }
+      }
+
+      if (ANTI_DEBUG_MNEMONICS.has(instr.mnemonic.toLowerCase())) {
+        flags.push(`ANTI_DEBUG_OPCODE:${instr.mnemonic.toUpperCase()}`)
+      }
+
+      if (/(fs|gs):\s*\[[^\]]*(30h|60h)/i.test(op) || /(beingdebugged|ntglobalflag|heapflags|debugport|debugflags)/i.test(op + comment)) {
+        flags.push('ANTI_DEBUG_PEB_CHECK')
+      }
+
+      if (/outputdebugstring|debugger|hidefromdebugger|beingdebugged|ntqueryinformationprocess|checkremotedebuggerpresent/i.test(op + comment)) {
+        flags.push('ANTI_DEBUG_FLOW')
       }
 
       // Stack smashing indicators
