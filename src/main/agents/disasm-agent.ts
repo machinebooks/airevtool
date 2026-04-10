@@ -708,27 +708,11 @@ export class DisasmAgent extends EventEmitter {
     instructions: DisasmInstruction[],
     address: string,
     flags: string[],
-    moduleName?: string,
+    _moduleName?: string,
   ): Promise<InitialBlockReview> {
     const listing = instructions
       .map(i => `${i.address}  ${i.bytes.padEnd(20)}  ${i.mnemonic} ${i.operands}${i.comment ? `  ; ${i.comment}` : ''}`)
       .join('\n')
-
-    const calleeAddresses = instructions
-      .filter(i => i.mnemonic.toLowerCase() === 'call' || i.mnemonic.toLowerCase() === 'jmp')
-      .map(i => this.extractDirectTarget(i))
-      .filter((a): a is string => a !== null)
-
-    const [callerCtx, calleeCtx, peerCtx] = await Promise.all([
-      this.rag.buildContext(`call target ${address} caller`, this.sessionId, 4, 'disasm', moduleName).catch(() => ''),
-      calleeAddresses.length > 0
-        ? this.rag.buildContext(calleeAddresses.join(' '), this.sessionId, 4, 'disasm', moduleName).catch(() => '')
-        : Promise.resolve(''),
-      this.rag.buildContext(
-        flags.length > 0 ? flags.join(' ') : `function block ${address}`,
-        this.sessionId, 4, 'disasm', moduleName,
-      ).catch(() => ''),
-    ])
 
     this.log('info', `Initial review @ ${address}`)
     this.setState({ status: 'waiting', currentTask: `Model reviewing block @ ${address}` })
@@ -739,9 +723,9 @@ export class DisasmAgent extends EventEmitter {
         address,
         listing,
         heuristicFlags: flags,
-        callers: callerCtx,
-        callees: calleeCtx,
-        relatedBlocks: peerCtx,
+        callers: '',
+        callees: '',
+        relatedBlocks: '',
         analystPrompt: this.analysisGuidance,
       }),
       timeout,
@@ -777,23 +761,6 @@ export class DisasmAgent extends EventEmitter {
       .map(i => `${i.address}  ${i.bytes.padEnd(20)}  ${i.mnemonic} ${i.operands}${i.comment ? `  ; ${i.comment}` : ''}`)
       .join('\n')
 
-    const calleeAddresses = instructions
-      .filter(i => i.mnemonic.toLowerCase() === 'call' || i.mnemonic.toLowerCase() === 'jmp')
-      .map(i => this.extractDirectTarget(i))
-      .filter((a): a is string => a !== null)
-
-    // #7 All RAG queries scoped to same module for higher relevance
-    const [callerCtx, calleeCtx, peerCtx] = await Promise.all([
-      this.rag.buildContext(`call target ${address} caller`, this.sessionId, 4, 'disasm', moduleName).catch(() => ''),
-      calleeAddresses.length > 0
-        ? this.rag.buildContext(calleeAddresses.join(' '), this.sessionId, 4, 'disasm', moduleName).catch(() => '')
-        : Promise.resolve(''),
-      this.rag.buildContext(
-        flags.length > 0 ? flags.join(' ') : `function block ${address}`,
-        this.sessionId, 4, 'disasm', moduleName,
-      ).catch(() => ''),
-    ])
-
     this.log('info', `Analyzing block @ ${address} (flags: ${flags.length > 0 ? flags.join(', ') : 'semantic'})`)
     this.setState({ status: 'waiting', currentTask: `Model analyzing block @ ${address}` })
 
@@ -802,7 +769,7 @@ export class DisasmAgent extends EventEmitter {
     const result = await Promise.race([
       this.lm.analyzeBlock({
         address, listing, heuristicFlags: flags,
-        callers: callerCtx, callees: calleeCtx, relatedBlocks: peerCtx,
+        callers: '', callees: '', relatedBlocks: '',
         analystPrompt: this.analysisGuidance,
       }),
       timeout,

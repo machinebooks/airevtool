@@ -708,19 +708,61 @@
   letter-spacing: 0.06em;
 }
 
+.disasm-callmap-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.disasm-callmap-control {
+  min-width: 30px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(88, 166, 255, 0.18);
+  background: rgba(9, 14, 20, 0.9);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.disasm-callmap-control.reset {
+  min-width: 44px;
+}
+
+.disasm-callmap-zoom {
+  min-width: 44px;
+  text-align: center;
+  color: var(--accent-cyan);
+}
+
 .disasm-callmap-scroll {
   flex: 1;
-  overflow: auto;
+  overflow: hidden;
   min-height: 0;
+  position: relative;
+  cursor: grab;
+  user-select: none;
   background:
     radial-gradient(circle at top left, rgba(31, 111, 235, 0.16), transparent 28%),
     linear-gradient(180deg, rgba(9, 12, 18, 0.86), rgba(18, 24, 31, 0.96));
 }
 
+.disasm-callmap-scroll.dragging {
+  cursor: grabbing;
+}
+
+.disasm-callmap-stage {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+
 .disasm-callmap-canvas {
   position: relative;
-  min-width: 100%;
-  min-height: 100%;
 }
 
 .disasm-callmap-links {

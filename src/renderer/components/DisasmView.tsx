@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type PointerEventHandler, type WheelEventHandler } from 'react'
 import type { Breakpoint, DisasmGraphEdge, DisasmGraphNode } from '../../shared/types'
 
 interface Props {
@@ -229,15 +229,156 @@ function CallMapView({
   breakpointAddresses: Set<string>
   onSelect: (nodeId: string) => void
 }) {
+  const viewportRef = useRef<HTMLDivElement | null>(null)
+  const dragStateRef = useRef<{ pointerId: number; startX: number; startY: number; originX: number; originY: number; moved: boolean } | null>(null)
+  const suppressClickRef = useRef(false)
+  const [isDragging, setIsDragging] = useState(false)
+  const [scale, setScale] = useState(0.78)
+  const [offset, setOffset] = useState({ x: 40, y: 24 })
+
+  useEffect(() => {
+    const viewport = viewportRef.current
+    if (!viewport) return
+
+    const padding = 48
+    const width = Math.max(viewport.clientWidth - padding * 2, 320)
+    const height = Math.max(viewport.clientHeight - padding * 2, 220)
+    const nextScale = Math.max(0.28, Math.min(1, Math.min(width / model.width, height / model.height)))
+    const nextOffset = {
+      x: Math.max(padding, (viewport.clientWidth - model.width * nextScale) / 2),
+      y: Math.max(18, (viewport.clientHeight - model.height * nextScale) / 2),
+    }
+
+    setScale(nextScale)
+    setOffset(nextOffset)
+  }, [model.height, model.width])
+
+  const updateScale = (nextScale: number, anchorX?: number, anchorY?: number) => {
+    const viewport = viewportRef.current
+    const clampedScale = Math.max(0.2, Math.min(2.25, nextScale))
+
+    if (!viewport || anchorX === undefined || anchorY === undefined) {
+      setScale(clampedScale)
+      return
+    }
+
+    const pointX = (anchorX - offset.x) / scale
+    const pointY = (anchorY - offset.y) / scale
+    setScale(clampedScale)
+    setOffset({
+      x: anchorX - pointX * clampedScale,
+      y: anchorY - pointY * clampedScale,
+    })
+  }
+
+  const handleWheel: WheelEventHandler<HTMLDivElement> = (event) => {
+    event.preventDefault()
+    const rect = event.currentTarget.getBoundingClientRect()
+    const anchorX = event.clientX - rect.left
+    const anchorY = event.clientY - rect.top
+    const delta = event.deltaY < 0 ? 1.1 : 0.9
+    updateScale(scale * delta, anchorX, anchorY)
+  }
+
+  const handlePointerDown: PointerEventHandler<HTMLDivElement> = (event) => {
+    if (event.button !== 0) return
+    setIsDragging(true)
+    dragStateRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      originX: offset.x,
+      originY: offset.y,
+      moved: false,
+    }
+    event.currentTarget.setPointerCapture(event.pointerId)
+  }
+
+  const handlePointerMove: PointerEventHandler<HTMLDivElement> = (event) => {
+    const drag = dragStateRef.current
+    if (!drag || drag.pointerId !== event.pointerId) return
+
+    const deltaX = event.clientX - drag.startX
+    const deltaY = event.clientY - drag.startY
+    if (!drag.moved && Math.hypot(deltaX, deltaY) > 4) {
+      drag.moved = true
+      suppressClickRef.current = true
+    }
+
+    setOffset({
+      x: drag.originX + deltaX,
+      y: drag.originY + deltaY,
+    })
+  }
+
+  const endDrag = (pointerId?: number) => {
+    if (pointerId !== undefined && dragStateRef.current?.pointerId !== pointerId) return
+    dragStateRef.current = null
+    setIsDragging(false)
+    window.setTimeout(() => {
+      suppressClickRef.current = false
+    }, 0)
+  }
+
+  const handleNodeSelect = (nodeId: string) => {
+    if (suppressClickRef.current) return
+    onSelect(nodeId)
+  }
+
   return (
     <div className="disasm-callmap-shell">
       <div className="disasm-callmap-toolbar">
         <span>{model.levels.length} layers</span>
         <span>{model.roots.length} roots</span>
         <span>{model.orphans.length} detached</span>
+        <div className="disasm-callmap-controls">
+          <button type="button" className="disasm-callmap-control" onClick={() => updateScale(scale * 0.9)}>
+            -
+          </button>
+          <span className="disasm-callmap-zoom">{Math.round(scale * 100)}%</span>
+          <button type="button" className="disasm-callmap-control" onClick={() => updateScale(scale * 1.1)}>
+            +
+          </button>
+          <button
+            type="button"
+            className="disasm-callmap-control reset"
+            onClick={() => {
+              const viewport = viewportRef.current
+              if (!viewport) return
+              const padding = 48
+              const width = Math.max(viewport.clientWidth - padding * 2, 320)
+              const height = Math.max(viewport.clientHeight - padding * 2, 220)
+              const nextScale = Math.max(0.28, Math.min(1, Math.min(width / model.width, height / model.height)))
+              setScale(nextScale)
+              setOffset({
+                x: Math.max(padding, (viewport.clientWidth - model.width * nextScale) / 2),
+                y: Math.max(18, (viewport.clientHeight - model.height * nextScale) / 2),
+              })
+            }}
+          >
+            Fit
+          </button>
+        </div>
       </div>
-      <div className="disasm-callmap-scroll">
-        <div className="disasm-callmap-canvas" style={{ width: `${model.width}px`, height: `${model.height}px` }}>
+      <div
+        ref={viewportRef}
+        className={`disasm-callmap-scroll ${isDragging ? 'dragging' : ''}`}
+        onWheel={handleWheel}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={(event) => endDrag(event.pointerId)}
+        onPointerLeave={(event) => endDrag(event.pointerId)}
+        onPointerCancel={(event) => endDrag(event.pointerId)}
+      >
+        <div
+          className="disasm-callmap-stage"
+          style={{
+            width: `${model.width}px`,
+            height: `${model.height}px`,
+            transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})`,
+          }}
+        >
+          <div className="disasm-callmap-canvas" style={{ width: `${model.width}px`, height: `${model.height}px` }}>
           <svg className="disasm-callmap-links" width={model.width} height={model.height} viewBox={`0 0 ${model.width} ${model.height}`}>
             {model.edgePaths.map(edge => (
               <g key={edge.id}>
@@ -262,7 +403,7 @@ function CallMapView({
                 type="button"
                 className={`disasm-callmap-node ${isCurrent ? 'current' : ''} ${isSelected ? 'selected' : ''}`}
                 style={{ left: `${item.x}px`, top: `${item.y}px` }}
-                onClick={() => onSelect(item.node.id)}
+                onClick={() => handleNodeSelect(item.node.id)}
               >
                 <div className="disasm-callmap-node-title">{item.node.name}</div>
                 <div className="disasm-callmap-node-address">{normalizeAddress(item.node.address)}</div>
@@ -274,6 +415,7 @@ function CallMapView({
               </button>
             )
           })}
+          </div>
         </div>
       </div>
     </div>
