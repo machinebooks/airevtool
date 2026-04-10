@@ -21,6 +21,31 @@ export interface DisasmInstruction {
   comment?: string
 }
 
+export interface DisasmGraphNode {
+  id: string
+  address: string
+  name: string
+  moduleName?: string
+  kind: 'entry' | 'function' | 'import' | 'block'
+  status: 'queued' | 'discovered' | 'analyzing' | 'analyzed'
+  flags: string[]
+}
+
+export interface DisasmGraphEdge {
+  id: string
+  from: string
+  to: string
+  type: 'call' | 'jump' | 'fallthrough' | 'xref'
+  mnemonic: string
+  resolution: 'direct' | 'indirect' | 'jump-table' | 'fallthrough' | 'unresolved'
+  label?: string
+}
+
+export interface DisasmGraphUpdate {
+  nodes: DisasmGraphNode[]
+  edges: DisasmGraphEdge[]
+}
+
 export interface Register {
   name: string
   value: string   // hex
@@ -67,6 +92,7 @@ export interface LMStudioConfig {
   maxTokens: number
   temperature: number
   contextWindow: number
+  analysisWorkers: number // parallel disasm analysis workers (default: 3)
 }
 
 export interface AIMessage {
@@ -137,6 +163,7 @@ export interface ReportTask {
   sessionId: string
   findings: Finding[]
   targetInfo: TargetInfo
+  globalAnalysis?: GlobalAnalysis
 }
 
 export interface AnalysisStartOptions {
@@ -185,9 +212,22 @@ export interface Finding {
   impact?: string
   remediation?: string
   proofOfConcept?: string
+  proofOfConceptPath?: string
   proofOfConceptGeneratedAt?: Date
   createdAt: Date
   confirmed: boolean
+}
+
+export interface GlobalAnalysis {
+  framework: string            // detected runtime / framework
+  envVariables: string[]       // env vars read by the binary
+  criticalExploits: string[]   // high-impact attack paths
+  secretFunctions: {           // functions that handle secrets/credentials
+    address: string
+    name: string
+    reason: string
+  }[]
+  summary: string              // human-readable paragraph
 }
 
 export interface ReportArtifact {
@@ -197,6 +237,9 @@ export interface ReportArtifact {
   format: 'markdown' | 'html' | 'json'
   content: string
   markdownPath?: string
+  htmlPath?: string
+  txtPath?: string
+  publicTxtPath?: string
   pdfPath?: string
   createdAt: Date
 }
@@ -265,6 +308,7 @@ export const IPC = {
   AGENT_LOG:           'agent:log',
   AGENT_FINDING:       'agent:finding',
   AGENT_TASK_QUEUE:    'agent:task-queue',
+  AGENT_DISASM_GRAPH_UPDATE: 'agent:disasm-graph-update',
 
   // LM Studio
   LM_CONFIG_GET:       'lm:config-get',
@@ -276,6 +320,7 @@ export const IPC = {
   // Session
   SESSION_NEW:         'session:new',
   SESSION_OPEN:        'session:open',
+  SESSION_OPEN_FOLDER: 'session:open-folder',
   SESSION_SAVE:        'session:save',
   SESSION_LIST:        'session:list',
 

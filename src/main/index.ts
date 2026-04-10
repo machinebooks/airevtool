@@ -97,8 +97,14 @@ app.whenReady().then(async () => {
   orchestrator.on('status', (status) => {
     mainWindow?.webContents.send(IPC.AGENT_STATUS, status)
   })
+  orchestrator.on('disasm-graph-update', (update) => {
+    mainWindow?.webContents.send(IPC.AGENT_DISASM_GRAPH_UPDATE, update)
+  })
   orchestrator.on('report-generated', (report) => {
     mainWindow?.webContents.send(IPC.REPORT_GENERATED, report)
+  })
+  orchestrator.on('global-analysis', (analysis) => {
+    mainWindow?.webContents.send('agent:global-analysis', analysis)
   })
 
   registerIPC()
@@ -266,6 +272,13 @@ function registerIPC() {
 
   ipcMain.handle(IPC.SESSION_SAVE, async (_, session: unknown) => {
     return database.saveSession(session)
+  })
+
+  ipcMain.handle(IPC.SESSION_OPEN_FOLDER, async (_, sessionId: string) => {
+    if (!sessionId) return { ok: false, error: 'Missing session ID' }
+    const sessionDir = await reportFileService.getSessionDirectory(sessionId)
+    const result = await shell.openPath(sessionDir)
+    return result ? { ok: false, error: result } : { ok: true, path: sessionDir }
   })
 
   // ── Findings ──

@@ -15,7 +15,8 @@ import type {
   AgentState,
   Finding,
   AgentLog,
-  DisasmInstruction,
+  DisasmGraphEdge,
+  DisasmGraphNode,
   MemoryRegion,
   Breakpoint,
   ReportArtifact,
@@ -33,7 +34,8 @@ export default function App() {
   const [dbgState, setDbgState] = useState<DebugState | null>(null)
   const [dbgLogs, setDbgLogs] = useState<string[]>([])
   const [memoryRegions, setMemoryRegions] = useState<MemoryRegion[]>([])
-  const [disasmInstructions, setDisasmInstructions] = useState<DisasmInstruction[]>([])
+  const [disasmNodes, setDisasmNodes] = useState<DisasmGraphNode[]>([])
+  const [disasmEdges, setDisasmEdges] = useState<DisasmGraphEdge[]>([])
   const [breakpoints, setBreakpoints] = useState<Breakpoint[]>([])
 
   // Agent state
@@ -76,13 +78,7 @@ export default function App() {
       setMemoryRegions(nextMemoryMap)
       setBreakpoints(nextBreakpoints)
 
-      if (!instructionAddress) {
-        setDisasmInstructions([])
-        return
-      }
-
-      const disasmResult = await api.dbg.disasm(instructionAddress, 160).catch(() => [])
-      setDisasmInstructions(disasmResult as DisasmInstruction[])
+      if (!instructionAddress) return
     } catch {
       setDbgConnected(false)
     }
@@ -102,7 +98,8 @@ export default function App() {
       setDbgConnected(false)
       setDbgState(null)
       setMemoryRegions([])
-      setDisasmInstructions([])
+      setDisasmNodes([])
+      setDisasmEdges([])
       setBreakpoints([])
     })
 
@@ -128,6 +125,11 @@ export default function App() {
       setAgentsRunning(states.some(a => a.status === 'running' || a.status === 'waiting'))
     })
 
+    const unsubDisasmGraph = api.agents.onDisasmGraph((update) => {
+      setDisasmNodes(prev => mergeGraphNodes(prev, update.nodes))
+      setDisasmEdges(prev => mergeGraphEdges(prev, update.edges))
+    })
+
     const unsubReport = api.reports.onGenerated((report) => {
       setLatestReport(report as ReportArtifact)
       setAgentLogs(prev => [
@@ -145,7 +147,7 @@ export default function App() {
 
     return () => {
       unsubPaused(); unsubStopped(); unsubLog()
-      unsubAgentLog(); unsubFinding(); unsubStatus(); unsubReport()
+      unsubAgentLog(); unsubFinding(); unsubStatus(); unsubReport(); unsubDisasmGraph()
     }
   }, [api.agents, api.dbg, refreshDebuggerSnapshot])
 
@@ -186,6 +188,9 @@ export default function App() {
   const handleLoadTarget = useCallback(async () => {
     if (!targetPath) return
 
+    setDisasmNodes([])
+    setDisasmEdges([])
+
     // 1. Create session regardless of x64dbg connection
     const session = await api.sessions.create(targetPath) as { id: string }
     setSessionId(session.id)
@@ -211,6 +216,8 @@ export default function App() {
     if (!sessionId) return
     setAgentsRunning(true)
     setShowAnalyzePrompt(false)
+    setDisasmNodes([])
+    setDisasmEdges([])
     try {
       const options: AnalysisStartOptions = {
         sessionId,
@@ -233,12 +240,18 @@ export default function App() {
     setDbgConnected(false)
     setDbgState(null)
     setMemoryRegions([])
-    setDisasmInstructions([])
+    setDisasmNodes([])
+    setDisasmEdges([])
     setBreakpoints([])
     setAgentsRunning(false)
     setSessionId(null)
     setTargetPath('')
   }, [api.agents, api.dbg])
+
+  const handleOpenSessionFolder = useCallback(async () => {
+    if (!sessionId) return
+    await api.sessions.openFolder(sessionId).catch(() => {})
+  }, [api.sessions, sessionId])
 
   const handleFindingUpdated = useCallback((updatedFinding: Finding) => {
     setFindings(prev => {
@@ -269,6 +282,7 @@ export default function App() {
         onBrowse={handleBrowse}
         onArchChange={setArch}
         onLoad={handleLoadTarget}
+        onOpenSessionFolder={handleOpenSessionFolder}
         onStop={handleStop}
         onPause={() => api.dbg.pause().catch(() => {})}
         onResume={() => api.dbg.resume().catch(() => {})}
@@ -307,7 +321,8 @@ export default function App() {
           <div className="content-main">
             {activePanel === 'disasm' && (
               <DisasmView
-                instructions={disasmInstructions}
+                nodes={disasmNodes}
+                edges={disasmEdges}
                 currentAddress={currentInstructionAddress}
                 breakpoints={breakpoints}
               />
@@ -328,6 +343,7 @@ export default function App() {
                 sessionId={sessionId}
                 latestReport={latestReport}
                 onFindingUpdated={handleFindingUpdated}
+                onOpenSessionFolder={handleOpenSessionFolder}
               />
             )}
             {activePanel === 'chat' && (
@@ -360,13 +376,13 @@ export default function App() {
           <div className="modal-card">
             <div className="modal-title">Adjust Analysis Prompt</div>
             <div className="modal-subtitle">
-              Add optional analyst guidance to steer memory, disassembly, classification, and report generation.
+              Add optional analyst guidance to steer memory, disassembly, classification, exploit development, and report generation.
             </div>
             <textarea
               className="analysis-prompt-input"
               value={analysisPrompt}
               onChange={event => setAnalysisPrompt(event.target.value)}
-              placeholder="Example: Focus on credential material, IPC abuse, and persistence indicators. Ignore anti-debug noise."
+              placeholder="Example: Prioritize likely RCE paths, exploit primitives, 0-day candidates, and crash-to-control-flow opportunities. Do not include remediation."
               autoFocus
             />
             <div className="modal-actions">
@@ -382,3 +398,20 @@ export default function App() {
 
 // dummy helper for typing only
 function buildApi() { return (window as unknown as { api: unknown }).api as never }
+
+function mergeGraphNodes(current: DisasmGraphNode[], incoming: DisasmGraphNode[]): DisasmGraphNode[] {
+  const map = new Map(current.map(node => [node.id, node]))
+  for (const node of incoming) {
+    const existing = map.get(node.id)
+    map.set(node.id, existing ? { ...existing, ...node, flags: node.flags.length > 0 ? node.flags : existing.flags } : node)
+  }
+  return [...map.values()]
+}
+
+function mergeGraphEdges(current: DisasmGraphEdge[], incoming: DisasmGraphEdge[]): DisasmGraphEdge[] {
+  const map = new Map(current.map(edge => [edge.id, edge]))
+  for (const edge of incoming) {
+    map.set(edge.id, edge)
+  }
+  return [...map.values()]
+}

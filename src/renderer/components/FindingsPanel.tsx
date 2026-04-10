@@ -6,6 +6,7 @@ interface Props {
   sessionId: string | null
   latestReport: ReportArtifact | null
   onFindingUpdated: (finding: Finding) => void
+  onOpenSessionFolder: () => void
 }
 
 const SEVERITY_ORDER = { critical: 0, high: 1, medium: 2, low: 3, info: 4 }
@@ -18,7 +19,7 @@ const SEVERITY_COLORS: Record<string, string> = {
   info:     '#888',
 }
 
-export function FindingsPanel({ findings, sessionId, latestReport, onFindingUpdated }: Props) {
+export function FindingsPanel({ findings, sessionId, latestReport, onFindingUpdated, onOpenSessionFolder }: Props) {
   const [selected, setSelected] = useState<Finding | null>(null)
   const [filter, setFilter] = useState<string>('all')
   const [activeView, setActiveView] = useState<'finding' | 'report'>('finding')
@@ -53,6 +54,15 @@ export function FindingsPanel({ findings, sessionId, latestReport, onFindingUpda
         <div className="panel-header">
           <span>Findings</span>
           <span style={{ marginLeft: 'auto', color: 'var(--text-muted)' }}>{findings.length} total</span>
+          {sessionId && (
+            <button
+              onClick={onOpenSessionFolder}
+              style={{ marginLeft: 8, padding: '2px 8px', fontSize: 10 }}
+              title="Open the analysis session folder"
+            >
+              Open Session Folder
+            </button>
+          )}
           {latestReport && (
             <button
               onClick={() => setActiveView(activeView === 'report' ? 'finding' : 'report')}
@@ -260,17 +270,39 @@ function ReportDetail({
   report: ReportArtifact
   openReportPath: (filePath: string) => Promise<{ ok: boolean; error?: string }>
 }) {
-  const [isOpeningMarkdown, setIsOpeningMarkdown] = useState(false)
+  const [openingPath, setOpeningPath] = useState<string | null>(null)
+  const [copiedPath, setCopiedPath] = useState<string | null>(null)
 
-  const handleOpenMarkdown = async () => {
-    if (!report.markdownPath || isOpeningMarkdown) return
-    setIsOpeningMarkdown(true)
+  const handleOpenPath = async (filePath?: string) => {
+    if (!filePath || openingPath === filePath) return
+    setOpeningPath(filePath)
     try {
-      await openReportPath(report.markdownPath)
+      await openReportPath(filePath)
     } finally {
-      setIsOpeningMarkdown(false)
+      setOpeningPath(current => (current === filePath ? null : current))
     }
   }
+
+  const handleCopyPath = async (filePath?: string) => {
+    if (!filePath) return
+    try {
+      await navigator.clipboard.writeText(filePath)
+      setCopiedPath(filePath)
+      window.setTimeout(() => {
+        setCopiedPath(current => (current === filePath ? null : current))
+      }, 1600)
+    } catch {
+      setCopiedPath(null)
+    }
+  }
+
+  const artifactEntries = [
+    { key: 'markdown', label: 'Markdown', path: report.markdownPath, extension: '.md', primary: true },
+    { key: 'html', label: 'HTML', path: report.htmlPath, extension: '.html' },
+    { key: 'vendor-txt', label: 'Vendor TXT', path: report.txtPath, extension: '.txt' },
+    { key: 'public-txt', label: 'Public TXT', path: report.publicTxtPath, extension: '.txt' },
+    { key: 'pdf', label: 'PDF', path: report.pdfPath, extension: '.pdf' },
+  ].filter((entry): entry is { key: string; label: string; path: string; extension: string; primary?: boolean } => Boolean(entry.path))
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -278,19 +310,52 @@ function ReportDetail({
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
           <span className="badge badge-info">REPORT</span>
           <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{new Date(report.createdAt).toLocaleString('en-US')}</span>
-          <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
-            {report.markdownPath && (
-              <button onClick={handleOpenMarkdown} disabled={isOpeningMarkdown} className="primary">
-                {isOpeningMarkdown ? 'Opening .md...' : 'Export .md'}
-              </button>
-            )}
-          </div>
         </div>
         <div style={{ fontWeight: 600, marginBottom: 2 }}>{report.title}</div>
         <div style={{ color: 'var(--text-muted)', fontSize: 11 }}>
-          Auto-generated when analysis finished{report.markdownPath ? ` · ${report.markdownPath}` : ''}
+          Auto-generated when analysis finished · vendor/public disclosure variants are stored with the report bundle
         </div>
       </div>
+
+      {artifactEntries.length > 0 && (
+        <Section label="Artifacts">
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {artifactEntries.map((artifact) => {
+              const fileName = artifact.path.split(/[/\\]/).pop() ?? artifact.path
+              const isOpening = openingPath === artifact.path
+              const isCopied = copiedPath === artifact.path
+              return (
+                <div
+                  key={artifact.key}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 8,
+                    padding: '8px 10px',
+                    border: '1px solid var(--border)',
+                    borderRadius: 'var(--radius)',
+                    background: 'var(--bg-secondary)',
+                  }}
+                >
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
+                      <span className="badge badge-info">{artifact.label}</span>
+                      <span style={{ fontSize: 11, color: 'var(--text-primary)', fontWeight: artifact.primary ? 600 : 500 }}>{fileName}</span>
+                    </div>
+                    <div style={{ fontSize: 10, color: 'var(--text-muted)', wordBreak: 'break-all' }}>{artifact.path}</div>
+                  </div>
+                  <button onClick={() => handleCopyPath(artifact.path)}>
+                    {isCopied ? 'Copied' : 'Copy path'}
+                  </button>
+                  <button onClick={() => handleOpenPath(artifact.path)} disabled={isOpening} className={artifact.primary ? 'primary' : ''}>
+                    {isOpening ? `Opening ${artifact.extension}...` : `Open ${artifact.extension}`}
+                  </button>
+                </div>
+              )
+            })}
+          </div>
+        </Section>
+      )}
 
       <Section label="Content">
         <FormattedAnalysis content={report.content} />

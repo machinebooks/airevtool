@@ -17,9 +17,9 @@ export interface VectorEntry {
 
 export class VectorStore {
   private entries: VectorEntry[] = []
+  private textHashes = new Set<string>()   // for O(1) dedup
 
   add(entry: VectorEntry): void {
-    // Replace if same id
     const idx = this.entries.findIndex(e => e.id === entry.id)
     if (idx >= 0) this.entries[idx] = entry
     else this.entries.push(entry)
@@ -28,6 +28,10 @@ export class VectorStore {
   addAll(entries: VectorEntry[]): void {
     for (const e of entries) this.add(e)
   }
+
+  /** Register a content hash so ingestCodeBlocks can skip re-embedding identical blocks. */
+  trackHash(hash: string): void { this.textHashes.add(hash) }
+  hasHash(hash: string): boolean { return this.textHashes.has(hash) }
 
   /** Return top-k most similar entries to the query vector */
   search(queryVec: number[], k = 5, filter?: Partial<VectorEntry['metadata']>): VectorEntry[] {
@@ -47,9 +51,30 @@ export class VectorStore {
       .map(x => x.entry)
   }
 
+  getBySessionAndType(sessionId: string, type: VectorEntry['metadata']['type']): VectorEntry[] {
+    return this.entries.filter(
+      e => e.metadata.sessionId === sessionId && e.metadata.type === type,
+    )
+  }
+
+  getBySession(sessionId: string): VectorEntry[] {
+    return this.entries.filter(e => e.metadata.sessionId === sessionId)
+  }
+
+  countBySessionAndType(sessionId: string, type: VectorEntry['metadata']['type']): number {
+    return this.entries.reduce(
+      (n, e) => n + (e.metadata.sessionId === sessionId && e.metadata.type === type ? 1 : 0),
+      0,
+    )
+  }
+
   clear(sessionId?: string): void {
     if (sessionId) this.entries = this.entries.filter(e => e.metadata.sessionId !== sessionId)
     else this.entries = []
+
+    // Hashes are only used as a best-effort dedup accelerator for fresh ingestion.
+    // Rebuild would require the original external hash inputs, so reset them after clears.
+    this.textHashes.clear()
   }
 
   get size(): number { return this.entries.length }

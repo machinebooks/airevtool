@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC } from '../shared/types'
-import type { AIMessage, LMStudioConfig, Finding, AnalysisStartOptions } from '../shared/types'
+import type { AIMessage, LMStudioConfig, Finding, AnalysisStartOptions, DisasmGraphUpdate } from '../shared/types'
 
 // ── Expose safe IPC bridge to renderer ──────────────────────
 
@@ -68,11 +68,16 @@ contextBridge.exposeInMainWorld('api', {
       ipcRenderer.on(IPC.AGENT_STATUS, (_, status) => cb(status))
       return () => ipcRenderer.removeAllListeners(IPC.AGENT_STATUS)
     },
+    onDisasmGraph: (cb: (update: DisasmGraphUpdate) => void) => {
+      ipcRenderer.on(IPC.AGENT_DISASM_GRAPH_UPDATE, (_, update) => cb(update as DisasmGraphUpdate))
+      return () => ipcRenderer.removeAllListeners(IPC.AGENT_DISASM_GRAPH_UPDATE)
+    },
   },
 
   // Sessions
   sessions: {
     create:     (targetPath: string) => ipcRenderer.invoke(IPC.SESSION_NEW, targetPath),
+    openFolder: (sessionId: string) => ipcRenderer.invoke(IPC.SESSION_OPEN_FOLDER, sessionId),
     list:       () => ipcRenderer.invoke(IPC.SESSION_LIST),
     save:       (session: unknown) => ipcRenderer.invoke(IPC.SESSION_SAVE, session),
   },

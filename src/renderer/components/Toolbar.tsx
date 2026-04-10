@@ -10,6 +10,7 @@ interface Props {
   onBrowse: () => void
   onArchChange: (arch: 'x64' | 'x32') => void
   onLoad: () => void
+  onOpenSessionFolder: () => void
   onStop: () => void
   onPause: () => void
   onResume: () => void
@@ -22,7 +23,7 @@ interface Props {
 
 export function Toolbar({
   sessionId, targetPath, arch, dbgConnected, agentsRunning, agentStates,
-  onBrowse, onArchChange, onLoad, onStop,
+  onBrowse, onArchChange, onLoad, onOpenSessionFolder, onStop,
   onPause, onResume, onStepIn, onStepOver, onStepOut,
   onStartAgents, onStopAgents,
 }: Props) {
@@ -84,6 +85,16 @@ export function Toolbar({
         >
           ▶ Load
         </button>
+
+        {hasSession && (
+          <button
+            onClick={onOpenSessionFolder}
+            title="Open the analysis session folder"
+            style={{ marginLeft: 2 }}
+          >
+            Open Folder
+          </button>
+        )}
 
         {hasSession && (
           <button

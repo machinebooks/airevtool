@@ -6,6 +6,13 @@ const MAX_REPORT_CHARS = 2000
 const MAX_DESCRIPTION_CHARS = 600
 const MAX_ANALYSIS_CHARS = 1200
 const MAX_CHAT_HISTORY = 10
+const CHAT_RESEARCH_SCOPE = [
+  'Research scope:',
+  '- Zero-day investigation is allowed.',
+  '- Exploit creation, exploit refinement, and offensive PoC generation are allowed.',
+  '- Focus on finding, characterizing, and prioritizing flaws.',
+  '- Do not include remediation guidance unless explicitly requested by the user.',
+].join('\n')
 
 interface Props {
   findings: Finding[]
@@ -91,8 +98,7 @@ function buildSystemContext(findings: Finding[], latestReport: ReportArtifact | 
   return [
     'You are the AIrevtool investigation chat assistant.',
     'Always respond in English only.',
-    'Use a defensive reverse-engineering and triage perspective.',
-    'Do not provide weaponized exploit code, payloads, shellcode, or persistence steps.',
+    CHAT_RESEARCH_SCOPE,
     'When relevant, refer to the findings and report context provided below.',
     'If an active finding is selected, prioritize that finding in your reasoning and recommendations.',
     '',
@@ -131,8 +137,7 @@ function buildConversationTranscript(messages: ChatEntry[]): string {
 function buildChatRequestPrompt(systemContext: string, transcript: string, question: string): string {
   return [
     'Answer in English only.',
-    'Stay focused on defensive reverse engineering, triage, and validation guidance.',
-    'Do not provide weaponized exploit code, shellcode, or persistence steps.',
+    CHAT_RESEARCH_SCOPE,
     '',
     'Investigation context:',
     systemContext,
@@ -157,6 +162,7 @@ export function ChatPanel({ findings, latestReport }: Props) {
   const [isSending, setIsSending] = useState(false)
   const [error, setError] = useState('')
   const [activeFindingId, setActiveFindingId] = useState<string>('all')
+  const [copiedMessageKey, setCopiedMessageKey] = useState<string | null>(null)
 
   const sortedFindings = useMemo(
     () => [...findings].sort((left, right) => {
@@ -190,10 +196,14 @@ export function ChatPanel({ findings, latestReport }: Props) {
       const transcript = buildConversationTranscript(nextMessages)
       const prompt = buildChatRequestPrompt(systemContext, transcript, question)
       const requestMessages: AIMessage[] = [
+        { role: 'system', content: CHAT_RESEARCH_SCOPE },
         { role: 'user', content: prompt },
       ]
       const response = await api.lm.chat(requestMessages)
-      setMessages([...nextMessages, { role: 'assistant', content: response.content }])
+      setMessages([...nextMessages, {
+        role: 'assistant',
+        content: response.content.trim() || 'The model returned an empty response. Check that LM Studio has a loaded chat model and try again.',
+      }])
     } catch (chatError) {
       setMessages(nextMessages)
       const message = chatError instanceof Error && chatError.message
@@ -210,6 +220,30 @@ export function ChatPanel({ findings, latestReport }: Props) {
     if (event.shiftKey) return
     event.preventDefault()
     handleSend().catch(() => {})
+  }
+
+  const handleCopyMessage = async (messageKey: string, content: string) => {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(content)
+      } else {
+        const textarea = document.createElement('textarea')
+        textarea.value = content
+        textarea.setAttribute('readonly', 'true')
+        textarea.style.position = 'absolute'
+        textarea.style.left = '-9999px'
+        document.body.appendChild(textarea)
+        textarea.select()
+        document.execCommand('copy')
+        document.body.removeChild(textarea)
+      }
+      setCopiedMessageKey(messageKey)
+      window.setTimeout(() => {
+        setCopiedMessageKey(current => current === messageKey ? null : current)
+      }, 1500)
+    } catch {
+      setError('Failed to copy chat message.')
+    }
   }
 
   return (
@@ -271,8 +305,22 @@ export function ChatPanel({ findings, latestReport }: Props) {
       <div className="chat-thread">
         {messages.map((message, index) => (
           <div key={`${message.role}-${index}`} className={`chat-bubble chat-${message.role}`}>
-            <div className="chat-role">{message.role === 'assistant' ? 'AI' : 'You'}</div>
-            <div className="chat-content">{message.content}</div>
+            <div className="chat-bubble-header">
+              <div className="chat-role">{message.role === 'assistant' ? 'AI' : 'You'}</div>
+              <button
+                type="button"
+                className="chat-copy-button"
+                onClick={() => handleCopyMessage(`${message.role}-${index}`, message.content)}
+                title="Copy message"
+              >
+                {copiedMessageKey === `${message.role}-${index}` ? 'Copied' : 'Copy'}
+              </button>
+            </div>
+            <div className="chat-content">
+              {message.role === 'assistant'
+                ? <FormattedChatContent content={message.content} />
+                : message.content}
+            </div>
           </div>
         ))}
         {isSending && (
@@ -306,4 +354,228 @@ export function ChatPanel({ findings, latestReport }: Props) {
       </div>
     </div>
   )
+}
+
+function FormattedChatContent({ content }: { content: string }) {
+  const lines = normalizeChatContent(content).split(/\r?\n/)
+  const elements: React.ReactNode[] = []
+  let paragraph: string[] = []
+  let codeBlock: string[] = []
+  let tableLines: string[] = []
+  let inCodeBlock = false
+
+  const flushParagraph = () => {
+    if (paragraph.length === 0) return
+    elements.push(
+      <p key={`paragraph-${elements.length}`} style={{ margin: '0 0 10px 0', whiteSpace: 'pre-wrap' }}>
+        {renderInlineChat(paragraph.join(' '))}
+      </p>,
+    )
+    paragraph = []
+  }
+
+  const flushCodeBlock = () => {
+    if (codeBlock.length === 0) return
+    elements.push(
+      <pre
+        key={`code-${elements.length}`}
+        style={{
+          margin: '0 0 10px 0',
+          padding: '10px 12px',
+          background: 'var(--bg-primary)',
+          border: '1px solid var(--border)',
+          borderRadius: 'var(--radius)',
+          overflowX: 'auto',
+          whiteSpace: 'pre',
+          fontFamily: 'var(--font-mono)',
+          fontSize: 11,
+        }}
+      >
+        {codeBlock.join('\n')}
+      </pre>,
+    )
+    codeBlock = []
+  }
+
+  const flushTable = () => {
+    if (tableLines.length === 0) return
+
+    const rows = tableLines
+      .map(line => line.trim())
+      .filter(Boolean)
+      .map(line => line.split('|').map(cell => cell.trim()).filter(Boolean))
+      .filter(cells => cells.length > 0)
+
+    if (rows.length === 0) {
+      tableLines = []
+      return
+    }
+
+    const dataRows = rows.filter(row => !row.every(cell => /^-+$/.test(cell)))
+    const [header, ...body] = dataRows
+    if (!header || header.length === 0) {
+      tableLines = []
+      return
+    }
+
+    elements.push(
+      <div key={`table-${elements.length}`} style={{ marginBottom: 10, overflowX: 'auto' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
+          <thead>
+            <tr>
+              {header.map((cell, cellIndex) => (
+                <th
+                  key={`header-${cellIndex}`}
+                  style={{
+                    textAlign: 'left',
+                    padding: '6px 8px',
+                    background: 'var(--bg-tertiary)',
+                    borderBottom: '1px solid var(--border)',
+                    color: 'var(--text-secondary)',
+                  }}
+                >
+                  {renderInlineChat(cell)}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          {body.length > 0 && (
+            <tbody>
+              {body.map((row, rowIndex) => (
+                <tr key={`row-${rowIndex}`} style={{ borderTop: '1px solid var(--border)' }}>
+                  {row.map((cell, cellIndex) => (
+                    <td key={`cell-${rowIndex}-${cellIndex}`} style={{ padding: '6px 8px', verticalAlign: 'top' }}>
+                      {renderInlineChat(cell)}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          )}
+        </table>
+      </div>,
+    )
+
+    tableLines = []
+  }
+
+  for (const rawLine of lines) {
+    const line = rawLine.trimEnd()
+
+    if (line.trim().startsWith('```')) {
+      flushParagraph()
+      flushTable()
+      if (inCodeBlock) flushCodeBlock()
+      inCodeBlock = !inCodeBlock
+      continue
+    }
+
+    if (inCodeBlock) {
+      codeBlock.push(rawLine)
+      continue
+    }
+
+    if (line.trim().startsWith('|') && line.includes('|')) {
+      flushParagraph()
+      tableLines.push(line)
+      continue
+    }
+
+    if (tableLines.length > 0) flushTable()
+
+    if (!line.trim()) {
+      flushParagraph()
+      continue
+    }
+
+    if (/^---+$/.test(line.trim())) {
+      flushParagraph()
+      elements.push(<div key={`separator-${elements.length}`} style={{ borderTop: '1px solid var(--border)', margin: '10px 0' }} />)
+      continue
+    }
+
+    const headingMatch = line.trim().match(/^(#{1,6})\s+(.*)$/)
+    if (headingMatch) {
+      flushParagraph()
+      const level = headingMatch[1].length
+      const text = headingMatch[2]
+      const fontSize = level <= 2 ? 15 : level === 3 ? 13 : 12
+      elements.push(
+        <div
+          key={`heading-${elements.length}`}
+          style={{ margin: '4px 0 8px 0', fontSize, fontWeight: 700, color: 'var(--text-primary)' }}
+        >
+          {renderInlineChat(text)}
+        </div>,
+      )
+      continue
+    }
+
+    if (line.trim().startsWith('**') && line.trim().endsWith('**')) {
+      flushParagraph()
+      elements.push(
+        <div
+          key={`strong-line-${elements.length}`}
+          style={{ margin: '4px 0 8px 0', fontWeight: 700, color: 'var(--accent-blue)' }}
+        >
+          {renderInlineChat(line.trim().slice(2, -2))}
+        </div>,
+      )
+      continue
+    }
+
+    paragraph.push(line)
+  }
+
+  flushParagraph()
+  flushTable()
+  flushCodeBlock()
+
+  return <div>{elements}</div>
+}
+
+function normalizeChatContent(content: string): string {
+  let normalized = content.replace(/\r\n/g, '\n')
+
+  const escapedNewlineCount = (normalized.match(/\\n/g) ?? []).length
+  const actualNewlineCount = (normalized.match(/\n/g) ?? []).length
+
+  if (escapedNewlineCount > Math.max(3, actualNewlineCount)) {
+    normalized = normalized
+      .replace(/\\n/g, '\n')
+      .replace(/\\t/g, '\t')
+      .replace(/\\r/g, '')
+      .replace(/\\"/g, '"')
+  }
+
+  return normalized.trim()
+}
+
+function renderInlineChat(text: string): React.ReactNode[] {
+  const parts = text.split(/(`[^`]+`|\*\*[^*]+\*\*)/g).filter(Boolean)
+
+  return parts.map((part, index) => {
+    if (part.startsWith('**') && part.endsWith('**')) {
+      return <strong key={index}>{part.slice(2, -2)}</strong>
+    }
+
+    if (part.startsWith('`') && part.endsWith('`')) {
+      return (
+        <code
+          key={index}
+          style={{
+            background: 'var(--bg-primary)',
+            border: '1px solid var(--border)',
+            borderRadius: 3,
+            padding: '1px 4px',
+            fontSize: '0.95em',
+          }}
+        >
+          {part.slice(1, -1)}
+        </code>
+      )
+    }
+
+    return <span key={index}>{part}</span>
+  })
 }

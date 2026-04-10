@@ -56,3 +56,19 @@ export function findRegionForAddress(regions: MemoryRegion[], address: string): 
 
   return null
 }
+
+export function normalizeModuleName(moduleName?: string): string {
+  if (!moduleName) return ''
+
+  const lower = moduleName.toLowerCase().trim()
+  if (!lower) return ''
+
+  const base = lower.split(/[/\\]/).pop() ?? lower
+  return base.replace(/\.(dll|exe|sys)$/i, '')
+}
+
+export function isSameModule(moduleName: string | undefined, targetModuleName: string | undefined): boolean {
+  const left = normalizeModuleName(moduleName)
+  const right = normalizeModuleName(targetModuleName)
+  return Boolean(left) && left === right
+}

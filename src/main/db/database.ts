@@ -1,7 +1,7 @@
-import { readFileSync, writeFileSync, existsSync } from 'fs'
+import { readFileSync, writeFileSync, existsSync, statSync } from 'fs'
 import { join } from 'path'
 import { app } from 'electron'
-import { randomUUID } from 'crypto'
+import { createHash, randomUUID } from 'crypto'
 import initSqlJs, { type Database as SqlJsDb } from 'sql.js'
 import type { Finding, AnalysisSession, ReportArtifact } from '../../shared/types'
 
@@ -61,6 +61,7 @@ export class Database {
         exploitability TEXT,
         cve_references TEXT,
         proof_of_concept TEXT,
+        proof_of_concept_path TEXT,
         proof_of_concept_generated_at TEXT,
         confirmed INTEGER DEFAULT 0,
         created_at TEXT NOT NULL
@@ -73,6 +74,9 @@ export class Database {
         format TEXT NOT NULL,
         content TEXT NOT NULL,
         markdown_path TEXT,
+        html_path TEXT,
+        txt_path TEXT,
+        public_txt_path TEXT,
         pdf_path TEXT,
         created_at TEXT NOT NULL
       );
@@ -88,8 +92,12 @@ export class Database {
     `)
 
     this.ensureColumn('findings', 'proof_of_concept', 'TEXT')
+    this.ensureColumn('findings', 'proof_of_concept_path', 'TEXT')
     this.ensureColumn('findings', 'proof_of_concept_generated_at', 'TEXT')
     this.ensureColumn('reports', 'markdown_path', 'TEXT')
+    this.ensureColumn('reports', 'html_path', 'TEXT')
+    this.ensureColumn('reports', 'txt_path', 'TEXT')
+    this.ensureColumn('reports', 'public_txt_path', 'TEXT')
     this.ensureColumn('reports', 'pdf_path', 'TEXT')
   }
 
@@ -132,21 +140,51 @@ export class Database {
   // ── Sessions ─────────────────────────────────────────────────
 
   createSession(targetPath: string): AnalysisSession {
-    const id = randomUUID()
+    const identity = this.buildBinaryIdentity(targetPath)
+    const id = identity.sha256
     const now = new Date().toISOString()
     const name = targetPath.split(/[/\\]/).pop() ?? 'unknown'
+    const targetInfo = {
+      path: targetPath,
+      arch: 'x64' as const,
+      fileSize: identity.fileSize,
+      md5: identity.md5,
+      sha256: identity.sha256,
+      modules: [],
+    }
+
+    const existing = this.getSession(id)
+
+    if (existing) {
+      this.db.run(
+        `UPDATE sessions
+         SET name=?, target_path=?, target_info=?, status='active', updated_at=?
+         WHERE id=?`,
+        [name, targetPath, JSON.stringify({ ...existing.targetInfo, ...targetInfo }), now, id],
+      )
+      this.scheduleSave()
+
+      return {
+        ...existing,
+        id,
+        name,
+        status: 'active',
+        targetInfo: { ...existing.targetInfo, ...targetInfo },
+        updatedAt: new Date(now),
+      }
+    }
 
     this.db.run(
-      `INSERT INTO sessions (id, name, target_path, status, created_at, updated_at)
-       VALUES (?, ?, ?, 'active', ?, ?)`,
-      [id, name, targetPath, now, now]
+      `INSERT INTO sessions (id, name, target_path, target_info, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'active', ?, ?)`,
+      [id, name, targetPath, JSON.stringify(targetInfo), now, now]
     )
     this.scheduleSave()
 
     return {
       id,
       name,
-      targetInfo: { path: targetPath, arch: 'x64', fileSize: 0, md5: '', sha256: '', modules: [] },
+      targetInfo,
       status: 'active',
       agents: [],
       findings: [],
@@ -200,6 +238,17 @@ export class Database {
     }
   }
 
+  private buildBinaryIdentity(targetPath: string): { fileSize: number; md5: string; sha256: string } {
+    const fileBuffer = readFileSync(targetPath)
+    const fileSize = statSync(targetPath).size
+
+    return {
+      fileSize,
+      md5: createHash('md5').update(fileBuffer).digest('hex'),
+      sha256: createHash('sha256').update(fileBuffer).digest('hex'),
+    }
+  }
+
   // ── Findings ──────────────────────────────────────────────────
 
   saveFinding(finding: unknown): void {
@@ -208,8 +257,8 @@ export class Database {
       `INSERT OR REPLACE INTO findings
         (id, session_id, severity, category, title, description, address, module_name,
          code_context, memory_context, agent_analysis, exploitability,
-         cve_references, proof_of_concept, proof_of_concept_generated_at, confirmed, created_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+         cve_references, proof_of_concept, proof_of_concept_path, proof_of_concept_generated_at, confirmed, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         f.id, f.sessionId ?? null, f.severity, f.category, f.title, f.description ?? '',
         f.address ?? null, f.moduleName ?? null,
@@ -219,6 +268,7 @@ export class Database {
         f.exploitability,
         JSON.stringify(f.cveReferences ?? []),
         f.proofOfConcept ?? null,
+        f.proofOfConceptPath ?? null,
         f.proofOfConceptGeneratedAt instanceof Date ? f.proofOfConceptGeneratedAt.toISOString() : f.proofOfConceptGeneratedAt ?? null,
         f.confirmed ? 1 : 0,
         f.createdAt instanceof Date ? f.createdAt.toISOString() : f.createdAt,
@@ -245,11 +295,11 @@ export class Database {
     this.scheduleSave()
   }
 
-  updateFindingProofOfConcept(findingId: string, proofOfConcept: string): Finding | null {
+  updateFindingProofOfConcept(findingId: string, proofOfConcept: string, proofOfConceptPath?: string): Finding | null {
     const generatedAt = new Date().toISOString()
     this.db.run(
-      'UPDATE findings SET proof_of_concept=?, proof_of_concept_generated_at=? WHERE id=?',
-      [proofOfConcept, generatedAt, findingId],
+      'UPDATE findings SET proof_of_concept=?, proof_of_concept_path=?, proof_of_concept_generated_at=? WHERE id=?',
+      [proofOfConcept, proofOfConceptPath ?? null, generatedAt, findingId],
     )
     this.scheduleSave()
 
@@ -265,7 +315,7 @@ export class Database {
     format: ReportArtifact['format'],
     content: string,
     title: string,
-    paths?: { markdownPath?: string; pdfPath?: string },
+    paths?: { markdownPath?: string; htmlPath?: string; txtPath?: string; publicTxtPath?: string; pdfPath?: string },
   ): ReportArtifact {
     const artifact: ReportArtifact = {
       id: randomUUID(),
@@ -274,13 +324,16 @@ export class Database {
       format,
       content,
       markdownPath: paths?.markdownPath,
+      htmlPath: paths?.htmlPath,
+      txtPath: paths?.txtPath,
+      publicTxtPath: paths?.publicTxtPath,
       pdfPath: paths?.pdfPath,
       createdAt: new Date(),
     }
 
     this.db.run(
-      `INSERT INTO reports (id, session_id, title, format, content, markdown_path, pdf_path, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO reports (id, session_id, title, format, content, markdown_path, html_path, txt_path, public_txt_path, pdf_path, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         artifact.id,
         artifact.sessionId,
@@ -288,6 +341,9 @@ export class Database {
         artifact.format,
         artifact.content,
         artifact.markdownPath ?? null,
+        artifact.htmlPath ?? null,
+        artifact.txtPath ?? null,
+        artifact.publicTxtPath ?? null,
         artifact.pdfPath ?? null,
         artifact.createdAt.toISOString(),
       ],
@@ -311,6 +367,9 @@ export class Database {
       format: row.format as ReportArtifact['format'],
       content: row.content as string,
       markdownPath: row.markdown_path as string | undefined,
+      htmlPath: row.html_path as string | undefined,
+      txtPath: row.txt_path as string | undefined,
+      publicTxtPath: row.public_txt_path as string | undefined,
       pdfPath: row.pdf_path as string | undefined,
       createdAt: new Date(row.created_at as string),
     }
@@ -331,6 +390,7 @@ export class Database {
       exploitability: r.exploitability as Finding['exploitability'],
       cveReferences: r.cve_references ? JSON.parse(r.cve_references as string) : [],
       proofOfConcept: r.proof_of_concept as string | undefined,
+      proofOfConceptPath: r.proof_of_concept_path as string | undefined,
       proofOfConceptGeneratedAt: r.proof_of_concept_generated_at ? new Date(r.proof_of_concept_generated_at as string) : undefined,
       sessionId: r.session_id as string | undefined,
       confirmed: Boolean(r.confirmed),
